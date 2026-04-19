@@ -1,13 +1,13 @@
 import os
 import logging
-import asyncpg
-import ssl
+import pg8000.native
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
 import threading
 import asyncio
+from urllib.parse import urlparse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -17,56 +17,63 @@ CHAT_ID = os.environ.get("CHAT_ID")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 app = Flask(__name__)
-db_pool = None
+main_loop = None
 
-async def get_pool():
-    global db_pool
-    if db_pool is None:
-        db_pool = await asyncpg.create_pool(DATABASE_URL, ssl='require')
-    return db_pool
+def get_db():
+    url = urlparse(DATABASE_URL)
+    conn = pg8000.native.Connection(
+        host=url.hostname,
+        port=url.port or 5432,
+        database=url.path[1:],
+        user=url.username,
+        password=url.password,
+        ssl_context=True
+    )
+    return conn
 
-async def setup_db():
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                id SERIAL PRIMARY KEY,
-                woo_order_id VARCHAR(50),
-                customer_name VARCHAR(200),
-                customer_email VARCHAR(200),
-                total DECIMAL(10,2),
-                status VARCHAR(50),
-                items TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS income (
-                id SERIAL PRIMARY KEY,
-                amount DECIMAL(10,2),
-                note TEXT,
-                type VARCHAR(20) DEFAULT 'manual',
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS resellers (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(200),
-                phone VARCHAR(50),
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS reseller_orders (
-                id SERIAL PRIMARY KEY,
-                reseller_id INTEGER REFERENCES resellers(id),
-                product TEXT,
-                quantity INTEGER,
-                price DECIMAL(10,2),
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
+def setup_db():
+    conn = get_db()
+    conn.run("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id SERIAL PRIMARY KEY,
+            woo_order_id VARCHAR(50),
+            customer_name VARCHAR(200),
+            customer_email VARCHAR(200),
+            total DECIMAL(10,2),
+            status VARCHAR(50),
+            items TEXT,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    conn.run("""
+        CREATE TABLE IF NOT EXISTS income (
+            id SERIAL PRIMARY KEY,
+            amount DECIMAL(10,2),
+            note TEXT,
+            type VARCHAR(20) DEFAULT 'manual',
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    conn.run("""
+        CREATE TABLE IF NOT EXISTS resellers (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(200),
+            phone VARCHAR(50),
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    conn.run("""
+        CREATE TABLE IF NOT EXISTS reseller_orders (
+            id SERIAL PRIMARY KEY,
+            reseller_id INTEGER REFERENCES resellers(id),
+            product TEXT,
+            quantity INTEGER,
+            price DECIMAL(10,2),
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    conn.close()
+    logger.info("Database setup complete!")
 
 def main_menu_keyboard():
     return InlineKeyboardMarkup([
@@ -121,12 +128,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_order_status(query, order_id, new_status)
 
 async def show_orders(query, days=1):
-    pool = await get_pool()
     since = datetime.now() - timedelta(days=days)
-    async with pool.acquire() as conn:
-        orders = await conn.fetch("SELECT * FROM orders WHERE created_at >= $1 ORDER BY created_at DESC", since)
+    conn = get_db()
+    rows = conn.run("SELECT id, woo_order_id, customer_name, total, status FROM orders WHERE created_at >= :since ORDER BY created_at DESC", since=since)
+    conn.close()
 
-    if not orders:
+    if not rows:
         label = "আজকে" if days == 1 else f"শেষ {days} দিনে"
         await query.edit_message_text(
             f"📦 {label} কোনো অর্ডার নেই।",
@@ -134,22 +141,22 @@ async def show_orders(query, days=1):
         )
         return
 
-    text = f"📦 *শেষ {days} দিনের অর্ডার ({len(orders)}টি):*\n\n"
+    text = f"📦 *শেষ {days} দিনের অর্ডার ({len(rows)}টি):*\n\n"
     keyboard = []
-    for o in orders[:10]:
-        text += f"🔸 #{o['woo_order_id']} — {o['customer_name']}\n"
-        text += f"   💵 ৳{o['total']} | {o['status']}\n\n"
-        keyboard.append([InlineKeyboardButton(f"✏️ #{o['woo_order_id']} status বদলাও", callback_data=f"status_{o['id']}")])
+    for o in rows[:10]:
+        text += f"🔸 #{o[1]} — {o[2]}\n"
+        text += f"   💵 ৳{o[3]} | {o[4]}\n\n"
+        keyboard.append([InlineKeyboardButton(f"✏️ #{o[1]} status বদলাও", callback_data=f"status_{o[0]}")])
     keyboard.append([InlineKeyboardButton("🔙 মেনু", callback_data="menu")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def show_income(query, days=1):
-    pool = await get_pool()
     since = datetime.now() - timedelta(days=days)
-    async with pool.acquire() as conn:
-        result = await conn.fetchrow("SELECT SUM(amount) as total, COUNT(*) as count FROM income WHERE created_at >= $1", since)
-    total = result['total'] or 0
-    count = result['count'] or 0
+    conn = get_db()
+    rows = conn.run("SELECT SUM(amount), COUNT(*) FROM income WHERE created_at >= :since", since=since)
+    conn.close()
+    total = rows[0][0] or 0
+    count = rows[0][1] or 0
     label = "আজকের" if days == 1 else f"শেষ {days} দিনের"
     await query.edit_message_text(
         f"💰 *{label} ইনকাম*\n\nমোট: ৳{total}\nএন্ট্রি: {count}টি",
@@ -158,15 +165,15 @@ async def show_income(query, days=1):
     )
 
 async def show_month_report(query):
-    pool = await get_pool()
     since = datetime.now() - timedelta(days=30)
-    async with pool.acquire() as conn:
-        order_data = await conn.fetchrow("SELECT COUNT(*) as orders, SUM(total) as revenue FROM orders WHERE created_at >= $1", since)
-        income_data = await conn.fetchrow("SELECT SUM(amount) as income FROM income WHERE created_at >= $1", since)
+    conn = get_db()
+    order_rows = conn.run("SELECT COUNT(*), SUM(total) FROM orders WHERE created_at >= :since", since=since)
+    income_rows = conn.run("SELECT SUM(amount) FROM income WHERE created_at >= :since", since=since)
+    conn.close()
     text = "📊 *মাসের রিপোর্ট (শেষ ৩০ দিন)*\n\n"
-    text += f"📦 মোট অর্ডার: {order_data['orders'] or 0}টি\n"
-    text += f"💵 WooCommerce রেভেনিউ: ৳{order_data['revenue'] or 0}\n"
-    text += f"💰 মোট ম্যানুয়াল ইনকাম: ৳{income_data['income'] or 0}\n"
+    text += f"📦 মোট অর্ডার: {order_rows[0][0] or 0}টি\n"
+    text += f"💵 WooCommerce রেভেনিউ: ৳{order_rows[0][1] or 0}\n"
+    text += f"💰 মোট ম্যানুয়াল ইনকাম: ৳{income_rows[0][0] or 0}\n"
     await query.edit_message_text(
         text,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 মেনু", callback_data="menu")]]),
@@ -174,17 +181,16 @@ async def show_month_report(query):
     )
 
 async def show_resellers(query):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        resellers = await conn.fetch("""
-            SELECT r.id, r.name, r.phone, COUNT(ro.id) as total_orders,
-            COALESCE(SUM(ro.price * ro.quantity), 0) as total_amount
-            FROM resellers r
-            LEFT JOIN reseller_orders ro ON r.id = ro.reseller_id
-            AND ro.created_at >= date_trunc('month', NOW())
-            GROUP BY r.id, r.name, r.phone
-        """)
-    if not resellers:
+    conn = get_db()
+    rows = conn.run("""
+        SELECT r.name, r.phone, COUNT(ro.id), COALESCE(SUM(ro.price * ro.quantity), 0)
+        FROM resellers r
+        LEFT JOIN reseller_orders ro ON r.id = ro.reseller_id
+        AND ro.created_at >= date_trunc('month', NOW())
+        GROUP BY r.id, r.name, r.phone
+    """)
+    conn.close()
+    if not rows:
         await query.edit_message_text(
             "👥 কোনো রিসেলার নেই।\n\nযোগ করতে: `/addreseller নাম ফোন`",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 মেনু", callback_data="menu")]]),
@@ -192,9 +198,9 @@ async def show_resellers(query):
         )
         return
     text = "👥 *এই মাসের রিসেলার রিপোর্ট:*\n\n"
-    for r in resellers:
-        text += f"🔸 {r['name']} ({r['phone']})\n"
-        text += f"   অর্ডার: {r['total_orders']}টি | মোট: ৳{r['total_amount']}\n\n"
+    for r in rows:
+        text += f"🔸 {r[0]} ({r[1]})\n"
+        text += f"   অর্ডার: {r[2]}টি | মোট: ৳{r[3]}\n\n"
     await query.edit_message_text(
         text,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 মেনু", callback_data="menu")]]),
@@ -209,15 +215,12 @@ async def show_status_options(query, order_id):
         [InlineKeyboardButton("❌ Cancelled", callback_data=f"setstatus_{order_id}_cancelled")],
         [InlineKeyboardButton("🔙 পিছনে", callback_data="today_orders")]
     ]
-    await query.edit_message_text(
-        f"✏️ Order #{order_id} এর নতুন status বেছে নাও:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await query.edit_message_text(f"✏️ Order #{order_id} এর নতুন status বেছে নাও:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def update_order_status(query, order_id, new_status):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("UPDATE orders SET status = $1 WHERE id = $2", new_status, int(order_id))
+    conn = get_db()
+    conn.run("UPDATE orders SET status = :status WHERE id = :id", status=new_status, id=int(order_id))
+    conn.close()
     await query.edit_message_text(
         f"✅ Order #{order_id} এর status *{new_status}* করা হয়েছে!",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 মেনু", callback_data="menu")]]),
@@ -231,9 +234,9 @@ async def income_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amount = float(context.args[0])
         note = " ".join(context.args[1:]) if len(context.args) > 1 else "ম্যানুয়াল এন্ট্রি"
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute("INSERT INTO income (amount, note, type) VALUES ($1, $2, 'manual')", amount, note)
+        conn = get_db()
+        conn.run("INSERT INTO income (amount, note, type) VALUES (:amount, :note, 'manual')", amount=amount, note=note)
+        conn.close()
         await update.message.reply_text(f"✅ ইনকাম যোগ হয়েছে!\n💰 ৳{amount}\n📝 {note}")
     except:
         await update.message.reply_text("❌ ভুল ফরম্যাট! উদাহরণ: /income 500 বিকাশে পেমেন্ট")
@@ -242,19 +245,19 @@ async def customer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 1:
         await update.message.reply_text("ফরম্যাট: /customer [email]\nউদাহরণ: /customer example@gmail.com")
         return
-    email = context.args[0]
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        orders = await conn.fetch("SELECT * FROM orders WHERE LOWER(customer_email) = LOWER($1) ORDER BY created_at DESC", email)
-    if not orders:
+    email = context.args[0].lower()
+    conn = get_db()
+    rows = conn.run("SELECT woo_order_id, customer_name, total, status, created_at FROM orders WHERE LOWER(customer_email) = :email ORDER BY created_at DESC", email=email)
+    conn.close()
+    if not rows:
         await update.message.reply_text(f"❌ {email} এই email এ কোনো অর্ডার পাওয়া যায়নি।")
         return
-    total_spent = sum(float(o['total']) for o in orders)
-    text = f"👤 *Customer: {orders[0]['customer_name']}*\n📧 {email}\n\n"
-    for o in orders:
-        status_emoji = "✅" if o['status'] == "completed" else "⏳" if o['status'] == "processing" else "❌"
-        text += f"{status_emoji} Order #{o['woo_order_id']} — {o['created_at'].strftime('%d %b %Y')}\n"
-        text += f"   ৳{o['total']} | {o['status']}\n\n"
+    total_spent = sum(float(o[2]) for o in rows)
+    text = f"👤 *Customer: {rows[0][1]}*\n📧 {email}\n\n"
+    for o in rows:
+        status_emoji = "✅" if o[3] == "completed" else "⏳" if o[3] == "processing" else "❌"
+        text += f"{status_emoji} Order #{o[0]} — {o[4].strftime('%d %b %Y')}\n"
+        text += f"   ৳{o[2]} | {o[3]}\n\n"
     text += f"💰 *মোট খরচ: ৳{total_spent:.2f}*"
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -264,9 +267,9 @@ async def addreseller_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     name = context.args[0]
     phone = context.args[1]
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("INSERT INTO resellers (name, phone) VALUES ($1, $2)", name, phone)
+    conn = get_db()
+    conn.run("INSERT INTO resellers (name, phone) VALUES (:name, :phone)", name=name, phone=phone)
+    conn.close()
     await update.message.reply_text(f"✅ রিসেলার যোগ হয়েছে!\n👤 {name}\n📞 {phone}")
 
 async def resellersale_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -278,26 +281,21 @@ async def resellersale_command(update: Update, context: ContextTypes.DEFAULT_TYP
         product = context.args[1]
         quantity = int(context.args[2])
         price = float(context.args[3])
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            reseller = await conn.fetchrow("SELECT * FROM resellers WHERE phone = $1", phone)
-            if not reseller:
-                await update.message.reply_text(f"❌ {phone} এই নম্বরে কোনো রিসেলার নেই।")
-                return
-            await conn.execute(
-                "INSERT INTO reseller_orders (reseller_id, product, quantity, price) VALUES ($1, $2, $3, $4)",
-                reseller['id'], product, quantity, price
-            )
+        conn = get_db()
+        reseller = conn.run("SELECT id, name FROM resellers WHERE phone = :phone", phone=phone)
+        if not reseller:
+            conn.close()
+            await update.message.reply_text(f"❌ {phone} এই নম্বরে কোনো রিসেলার নেই।")
+            return
+        conn.run("INSERT INTO reseller_orders (reseller_id, product, quantity, price) VALUES (:rid, :product, :quantity, :price)",
+                 rid=reseller[0][0], product=product, quantity=quantity, price=price)
+        conn.close()
         total = quantity * price
-        await update.message.reply_text(
-            f"✅ রিসেলার সেল রেকর্ড হয়েছে!\n👤 {reseller['name']}\n📦 {product} x{quantity}\n💰 ৳{total}"
-        )
+        await update.message.reply_text(f"✅ রিসেলার সেল রেকর্ড হয়েছে!\n👤 {reseller[0][1]}\n📦 {product} x{quantity}\n💰 ৳{total}")
     except:
         await update.message.reply_text("❌ ভুল ফরম্যাট! উদাহরণ: /rsale 01712345678 শার্ট 3 450")
 
 # =================== FLASK WEBHOOK ===================
-
-main_loop = None
 
 @app.route('/webhook/woocommerce', methods=['POST'])
 def woocommerce_webhook():
@@ -314,31 +312,25 @@ def woocommerce_webhook():
         line_items = data.get('line_items', [])
         items_text = ", ".join([f"{item['name']} x{item['quantity']}" for item in line_items])
 
-        async def save_and_notify():
-            pool = await get_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "INSERT INTO orders (woo_order_id, customer_name, customer_email, total, status, items) VALUES ($1,$2,$3,$4,$5,$6)",
-                    order_id, customer_name, customer_email, total, status, items_text
-                )
-                await conn.execute(
-                    "INSERT INTO income (amount, note, type) VALUES ($1, $2, 'auto')",
-                    total, f"WooCommerce Order #{order_id}"
-                )
-            message = (
-                f"🛍️ *নতুন অর্ডার!*\n\n"
-                f"📋 Order #{order_id}\n"
-                f"👤 {customer_name}\n"
-                f"📧 {customer_email}\n"
-                f"📦 {items_text}\n"
-                f"💵 ৳{total}\n"
-                f"📊 Status: {status}"
-            )
-            from telegram import Bot
-            bot = Bot(token=BOT_TOKEN)
-            await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="Markdown")
+        conn = get_db()
+        conn.run(
+            "INSERT INTO orders (woo_order_id, customer_name, customer_email, total, status, items) VALUES (:oid, :name, :email, :total, :status, :items)",
+            oid=order_id, name=customer_name, email=customer_email, total=total, status=status, items=items_text
+        )
+        conn.run("INSERT INTO income (amount, note, type) VALUES (:amount, :note, 'auto')",
+                 amount=total, note=f"WooCommerce Order #{order_id}")
+        conn.close()
 
-        asyncio.run_coroutine_threadsafe(save_and_notify(), main_loop)
+        message = (
+            f"🛍️ *নতুন অর্ডার!*\n\n"
+            f"📋 Order #{order_id}\n"
+            f"👤 {customer_name}\n"
+            f"📧 {customer_email}\n"
+            f"📦 {items_text}\n"
+            f"💵 ৳{total}\n"
+            f"📊 Status: {status}"
+        )
+        asyncio.run_coroutine_threadsafe(send_telegram_message(message), main_loop)
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         logger.error(f"Webhook error: {e}")
@@ -348,13 +340,18 @@ def woocommerce_webhook():
 def health():
     return jsonify({"status": "running"}), 200
 
+async def send_telegram_message(message):
+    from telegram import Bot
+    bot = Bot(token=BOT_TOKEN)
+    await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="Markdown")
+
 def run_flask():
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
 
 async def main():
     global main_loop
     main_loop = asyncio.get_event_loop()
-    await setup_db()
+    setup_db()
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     application = Application.builder().token(BOT_TOKEN).build()
