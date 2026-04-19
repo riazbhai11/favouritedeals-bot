@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncpg
+import ssl
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from flask import Flask, request, jsonify
@@ -21,7 +22,7 @@ db_pool = None
 async def get_pool():
     global db_pool
     if db_pool is None:
-        db_pool = await asyncpg.create_pool(DATABASE_URL)
+        db_pool = await asyncpg.create_pool(DATABASE_URL, ssl='require')
     return db_pool
 
 async def setup_db():
@@ -208,7 +209,10 @@ async def show_status_options(query, order_id):
         [InlineKeyboardButton("❌ Cancelled", callback_data=f"setstatus_{order_id}_cancelled")],
         [InlineKeyboardButton("🔙 পিছনে", callback_data="today_orders")]
     ]
-    await query.edit_message_text(f"✏️ Order #{order_id} এর নতুন status বেছে নাও:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(
+        f"✏️ Order #{order_id} এর নতুন status বেছে নাও:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def update_order_status(query, order_id, new_status):
     pool = await get_pool()
@@ -285,7 +289,9 @@ async def resellersale_command(update: Update, context: ContextTypes.DEFAULT_TYP
                 reseller['id'], product, quantity, price
             )
         total = quantity * price
-        await update.message.reply_text(f"✅ রিসেলার সেল রেকর্ড হয়েছে!\n👤 {reseller['name']}\n📦 {product} x{quantity}\n💰 ৳{total}")
+        await update.message.reply_text(
+            f"✅ রিসেলার সেল রেকর্ড হয়েছে!\n👤 {reseller['name']}\n📦 {product} x{quantity}\n💰 ৳{total}"
+        )
     except:
         await update.message.reply_text("❌ ভুল ফরম্যাট! উদাহরণ: /rsale 01712345678 শার্ট 3 450")
 
@@ -315,7 +321,10 @@ def woocommerce_webhook():
                     "INSERT INTO orders (woo_order_id, customer_name, customer_email, total, status, items) VALUES ($1,$2,$3,$4,$5,$6)",
                     order_id, customer_name, customer_email, total, status, items_text
                 )
-                await conn.execute("INSERT INTO income (amount, note, type) VALUES ($1, $2, 'auto')", total, f"WooCommerce Order #{order_id}")
+                await conn.execute(
+                    "INSERT INTO income (amount, note, type) VALUES ($1, $2, 'auto')",
+                    total, f"WooCommerce Order #{order_id}"
+                )
             message = (
                 f"🛍️ *নতুন অর্ডার!*\n\n"
                 f"📋 Order #{order_id}\n"
