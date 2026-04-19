@@ -21,13 +21,17 @@ main_loop = None
 
 def get_db():
     url = urlparse(DATABASE_URL)
+    import ssl
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
     conn = pg8000.native.Connection(
         host=url.hostname,
         port=url.port or 5432,
         database=url.path[1:],
         user=url.username,
         password=url.password,
-        ssl_context=False
+        ssl_context=ssl_context
     )
     return conn
 
