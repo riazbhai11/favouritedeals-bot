@@ -2,14 +2,15 @@ import os
 import logging
 import pg8000.native
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
 import threading
 import asyncio
 import nest_asyncio
+import requests as req
 from urllib.parse import urlparse
+import json
 
 nest_asyncio.apply()
 
@@ -19,6 +20,9 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 DATABASE_URL = os.environ.get("DATABASE_URL")
+WC_KEY = os.environ.get("WC_KEY")
+WC_SECRET = os.environ.get("WC_SECRET")
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 
 app = Flask(__name__)
 main_loop = None
@@ -31,7 +35,7 @@ def get_db():
     ssl_context.verify_mode = ssl.CERT_NONE
     conn = pg8000.native.Connection(
         host=url.hostname,
-        port=url.port or 8080,
+        port=url.port or 5432,
         database=url.path[1:],
         user=url.username,
         password=url.password,
@@ -96,10 +100,42 @@ def main_menu_keyboard():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🛍️ *Favourite Deals Bot*\n\nস্বাগতম! নিচের মেনু থেকে যা দরকার select করো:",
+        "🛍️ *Favourite Deals Bot*\n\nস্বাগতম! নিচের মেনু থেকে যা দরকার select করো:\n\nঅথবা সরাসরি প্রশ্ন করো! 🤖",
         reply_markup=main_menu_keyboard(),
         parse_mode="Markdown"
     )
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+
+    conn = get_db()
+    today_orders = conn.run("SELECT COUNT(*) FROM orders WHERE created_at >= NOW() - INTERVAL '1 day'")
+    today_income = conn.run("SELECT COALESCE(SUM(amount), 0) FROM income WHERE created_at >= NOW() - INTERVAL '1 day'")
+    month_orders = conn.run("SELECT COUNT(*) FROM orders WHERE created_at >= NOW() - INTERVAL '30 days'")
+    month_income = conn.run("SELECT COALESCE(SUM(amount), 0) FROM income WHERE created_at >= NOW() - INTERVAL '30 days'")
+    conn.close()
+
+    system_context = f"""তুমি Favourite Deals এর AI business assistant।
+আজকের অর্ডার: {today_orders[0][0]}টি
+আজকের ইনকাম: ৳{today_income[0][0]}
+এই মাসের অর্ডার: {month_orders[0][0]}টি
+এই মাসের ইনকাম: ৳{month_income[0][0]}
+
+ব্যবহারকারীর প্রশ্নের উত্তর বাংলায় দাও। সংক্ষিপ্ত ও সহায়ক হও।
+মেনু দেখতে /start লেখো বলো।"""
+
+    try:
+        response = req.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
+            json={"contents": [{"parts": [{"text": f"{system_context}\n\nপ্রশ্ন: {text}"}]}]},
+            timeout=10
+        )
+        reply = response.json()['candidates'][0]['content']['parts'][0]['text']
+    except Exception as e:
+        logger.error(f"Gemini error: {e}")
+        reply = "দুঃখিত, এখন উত্তর দিতে পারছি না। মেনুর জন্য /start দাও।"
+
+    await update.message.reply_text(reply)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -236,11 +272,11 @@ async def update_order_status(query, order_id, new_status):
 
     if rows:
         woo_order_id = rows[0][0]
-        wc_key = os.environ.get("WC_KEY")
-        wc_secret = os.environ.get("WC_SECRET")
         wc_url = f"https://favouritedeals.online/wp-json/wc/v3/orders/{woo_order_id}"
-        import requests
-        requests.put(wc_url, json={"status": new_status}, auth=(wc_key, wc_secret))
+        try:
+            req.put(wc_url, json={"status": new_status}, auth=(WC_KEY, WC_SECRET), timeout=10)
+        except Exception as e:
+            logger.error(f"WC update error: {e}")
 
     await query.edit_message_text(
         f"✅ Order #{order_id} এর status *{new_status}* করা হয়েছে!",
@@ -323,14 +359,14 @@ def woocommerce_webhook():
     try:
         raw_data = request.data
         if not raw_data:
-            return jsonify({"status": "no data"}), 200
-        import json
+            return jsonify({"status": "ok"}), 200
         try:
             data = json.loads(raw_data)
         except:
             return jsonify({"status": "ok"}), 200
         if not data:
             return jsonify({"status": "ok"}), 200
+
         order_id = str(data.get('id', 'N/A'))
         customer = data.get('billing', {})
         customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip() or "Unknown"
@@ -374,7 +410,7 @@ async def send_telegram_message(message):
     await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="Markdown")
 
 def run_flask():
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
 
 async def main():
     global main_loop
@@ -392,34 +428,6 @@ async def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Bot started!")
     await application.run_polling()
-    async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    import requests as req
-    GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
-    
-    # Database context
-    conn = get_db()
-    today_orders = conn.run("SELECT COUNT(*) FROM orders WHERE created_at >= NOW() - INTERVAL '1 day'")
-    today_income = conn.run("SELECT COALESCE(SUM(amount), 0) FROM income WHERE created_at >= NOW() - INTERVAL '1 day'")
-    conn.close()
-    
-    system_context = f"""তুমি Favourite Deals এর business assistant। 
-    আজকের অর্ডার: {today_orders[0][0]}টি
-    আজকের ইনকাম: ৳{today_income[0][0]}
-    
-    ব্যবহারকারীর প্রশ্নের উত্তর বাংলায় দাও। সংক্ষিপ্ত রাখো।"""
-    
-    response = req.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
-        json={"contents": [{"parts": [{"text": f"{system_context}\n\nপ্রশ্ন: {text}"}]}]}
-    )
-    
-    try:
-        reply = response.json()['candidates'][0]['content']['parts'][0]['text']
-    except:
-        reply = "দুঃখিত, এখন উত্তর দিতে পারছি না।"
-    
-    await update.message.reply_text(reply)
 
 if __name__ == '__main__':
     asyncio.run(main())
