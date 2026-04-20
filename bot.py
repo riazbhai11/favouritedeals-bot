@@ -30,7 +30,7 @@ def get_db():
     ssl_context.verify_mode = ssl.CERT_NONE
     conn = pg8000.native.Connection(
         host=url.hostname,
-        port=url.port or 5432,
+        port=url.port or 8080,
         database=url.path[1:],
         user=url.username,
         password=url.password,
