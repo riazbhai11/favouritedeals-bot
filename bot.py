@@ -2,6 +2,7 @@ import os
 import logging
 import pg8000.native
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
@@ -388,8 +389,37 @@ async def main():
     application.add_handler(CommandHandler("addreseller", addreseller_command))
     application.add_handler(CommandHandler("rsale", resellersale_command))
     application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Bot started!")
     await application.run_polling()
+    async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    import requests as req
+    GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
+    
+    # Database context
+    conn = get_db()
+    today_orders = conn.run("SELECT COUNT(*) FROM orders WHERE created_at >= NOW() - INTERVAL '1 day'")
+    today_income = conn.run("SELECT COALESCE(SUM(amount), 0) FROM income WHERE created_at >= NOW() - INTERVAL '1 day'")
+    conn.close()
+    
+    system_context = f"""তুমি Favourite Deals এর business assistant। 
+    আজকের অর্ডার: {today_orders[0][0]}টি
+    আজকের ইনকাম: ৳{today_income[0][0]}
+    
+    ব্যবহারকারীর প্রশ্নের উত্তর বাংলায় দাও। সংক্ষিপ্ত রাখো।"""
+    
+    response = req.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
+        json={"contents": [{"parts": [{"text": f"{system_context}\n\nপ্রশ্ন: {text}"}]}]}
+    )
+    
+    try:
+        reply = response.json()['candidates'][0]['content']['parts'][0]['text']
+    except:
+        reply = "দুঃখিত, এখন উত্তর দিতে পারছি না।"
+    
+    await update.message.reply_text(reply)
 
 if __name__ == '__main__':
     asyncio.run(main())
