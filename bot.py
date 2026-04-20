@@ -7,7 +7,10 @@ from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
 import threading
 import asyncio
+import nest_asyncio
 from urllib.parse import urlparse
+
+nest_asyncio.apply()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -219,7 +222,10 @@ async def show_status_options(query, order_id):
         [InlineKeyboardButton("❌ Cancelled", callback_data=f"setstatus_{order_id}_cancelled")],
         [InlineKeyboardButton("🔙 পিছনে", callback_data="today_orders")]
     ]
-    await query.edit_message_text(f"✏️ Order #{order_id} এর নতুন status বেছে নাও:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(
+        f"✏️ Order #{order_id} এর নতুন status বেছে নাও:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def update_order_status(query, order_id, new_status):
     conn = get_db()
