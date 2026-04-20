@@ -130,7 +130,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             json={"contents": [{"parts": [{"text": f"{system_context}\n\nপ্রশ্ন: {text}"}]}]},
             timeout=10
         )
-        reply = response.json()['candidates'][0]['content']['parts'][0]['text']
+        resp_json = response.json()
+        if 'candidates' in resp_json:
+            reply = resp_json['candidates'][0]['content']['parts'][0]['text']
+        elif 'error' in resp_json:
+            logger.error(f"Gemini API error: {resp_json['error']}")
+            reply = "দুঃখিত, AI সাড়া দিচ্ছে না।"
+        else:
+            logger.error(f"Gemini unknown response: {resp_json}")
+            reply = "দুঃখিত, AI সাড়া দিচ্ছে না।"
     except Exception as e:
         logger.error(f"Gemini error: {e}")
         reply = "দুঃখিত, এখন উত্তর দিতে পারছি না। মেনুর জন্য /start দাও।"
