@@ -310,7 +310,7 @@ async def resellersale_command(update: Update, context: ContextTypes.DEFAULT_TYP
 @app.route('/webhook/woocommerce', methods=['POST'])
 def woocommerce_webhook():
     try:
-        data = request.json
+        data = request.get_json(force=True)
         if not data:
             return jsonify({"status": "no data"}), 400
         order_id = str(data.get('id', 'N/A'))
