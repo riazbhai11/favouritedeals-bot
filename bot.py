@@ -126,7 +126,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         response = req.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
             json={"contents": [{"parts": [{"text": f"{system_context}\n\nপ্রশ্ন: {text}"}]}]},
             timeout=10
         )
