@@ -229,8 +229,18 @@ async def show_status_options(query, order_id):
 
 async def update_order_status(query, order_id, new_status):
     conn = get_db()
+    rows = conn.run("SELECT woo_order_id FROM orders WHERE id = :id", id=int(order_id))
     conn.run("UPDATE orders SET status = :status WHERE id = :id", status=new_status, id=int(order_id))
     conn.close()
+
+    if rows:
+        woo_order_id = rows[0][0]
+        wc_key = os.environ.get("WC_KEY")
+        wc_secret = os.environ.get("WC_SECRET")
+        wc_url = f"https://favouritedeals.online/wp-json/wc/v3/orders/{woo_order_id}"
+        import requests
+        requests.put(wc_url, json={"status": new_status}, auth=(wc_key, wc_secret))
+
     await query.edit_message_text(
         f"✅ Order #{order_id} এর status *{new_status}* করা হয়েছে!",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 মেনু", callback_data="menu")]]),
