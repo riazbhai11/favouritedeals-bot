@@ -126,7 +126,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         response = req.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
+            import os
+import requests
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+url = "https://api.openai.com/v1/chat/completions"
+
+headers = {
+    "Authorization": f"Bearer {OPENAI_API_KEY}",
+    "Content-Type": "application/json"
+}
+
+data = {
+    "model": "gpt-4.1-mini",
+    "messages": [
+        {"role": "user", "content": user_message}
+    ]
+}
+
+response = requests.post(url, headers=headers, json=data)
+reply = response.json()["choices"][0]["message"]["content"]
             json={"contents": [{"parts": [{"text": f"{system_context}\n\nপ্রশ্ন: {text}"}]}]},
             timeout=10
         )
