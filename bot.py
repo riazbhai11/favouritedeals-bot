@@ -1522,14 +1522,14 @@ async def reseller_pay_method_handler(update: Update, context: ContextTypes.DEFA
     chat_id = query.message.chat_id
     method  = "bkash" if query.data == "res_pay_bkash" else "nagad"
     number  = NAGAD_NUMBER if method == "nagad" else BKASH_NUMBER
-    if chat_id in reseller_user_data:
-        reseller_user_data[chat_id]["payment_method"] = method
-        reseller_user_data[chat_id]["state"]          = "waiting_transaction"
-    amount  = reseller_user_data.get(chat_id, {}).get("amount", "?")
-    product = reseller_user_data.get(chat_id, {}).get("product_name", "")
-    reseller = get_reseller_by_chat_id(chat_id)
-    code  = reseller["code"] if reseller else "RSCODE"
+    if chat_id not in reseller_user_data:
+        await query.edit_message_text("❌ Session শেষ। আবার /start দাও।"); return
+    reseller_user_data[chat_id]["payment_method"] = method
+    reseller_user_data[chat_id]["state"]          = "waiting_transaction"
     amount_val = reseller_user_data.get(chat_id, {}).get("amount", "?")
+    product    = reseller_user_data.get(chat_id, {}).get("product_name", "")
+    reseller   = get_reseller_by_chat_id(chat_id)
+    code       = reseller["code"] if reseller else "RSCODE"
     number_label = "Send Money" if method == "nagad" else "Payment/Merchant Number"
     await query.edit_message_text(
         f"💳 *{method.upper()} Payment*\n\n"
@@ -1575,6 +1575,9 @@ async def reseller_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
         product  = user_state.get("product_name")
         email    = user_state.get("customer_email")
         amount   = user_state.get("amount")
+        if not product or not email or not amount:
+            await update.message.reply_text("❌ Session data নেই। আবার /start দিয়ে নতুন order দাও।",
+                reply_markup=reseller_main_menu()); return
         conn = get_db()
         try:
             rows = conn.run(
@@ -1606,22 +1609,24 @@ async def reseller_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("❌ TxnID minimum 6 character lagbe!"); return
         order_id = user_state.get("paying_order_id")
         method   = user_state.get("payment_method", "bkash")
-        if order_id:
-            order = get_reseller_bot_order(order_id)
-            conn  = get_db()
-            try:
-                conn.run(
-                    "UPDATE reseller_bot_orders SET transaction_id=:t, payment_method=:m WHERE id=:id",
-                    t=text, m=method, id=order_id)
-            finally:
-                conn.close()
-            await send_payment_check_to_admin(order_id, reseller["code"], text, method, order["amount"])
-            await update.message.reply_text(
-                f"✅ *Payment Info পাঠানো হয়েছে!*\n\n"
-                f"Order #{order_id}\n"
-                f"💳 {method.upper()} TxnID: `{text}`\n\n"
-                f"Admin verify করবে। Notify করব!",
-                reply_markup=reseller_main_menu(), parse_mode="Markdown")
+        if not order_id:
+            await update.message.reply_text("❌ Session data নেই। 'আমার Orders' থেকে আবার try করো।",
+                reply_markup=reseller_main_menu()); return
+        order = get_reseller_bot_order(order_id)
+        conn  = get_db()
+        try:
+            conn.run(
+                "UPDATE reseller_bot_orders SET transaction_id=:t, payment_method=:m WHERE id=:id",
+                t=text, m=method, id=order_id)
+        finally:
+            conn.close()
+        await send_payment_check_to_admin(order_id, reseller["code"], text, method, order["amount"])
+        await update.message.reply_text(
+            f"✅ *Payment Info পাঠানো হয়েছে!*\n\n"
+            f"Order #{order_id}\n"
+            f"💳 {method.upper()} TxnID: `{text}`\n\n"
+            f"Admin verify করবে। Notify করব!",
+            reply_markup=reseller_main_menu(), parse_mode="Markdown")
         reseller_user_data.pop(chat_id, None)
 
     else:
