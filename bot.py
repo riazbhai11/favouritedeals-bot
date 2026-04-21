@@ -32,7 +32,7 @@ WC_SECRET          = os.environ.get("WC_SECRET")
 OPENAI_KEY         = os.environ.get("OPENAI_API_KEY")
 RESELLER_BOT_TOKEN = os.environ.get("RESELLER_BOT_TOKEN")
 BKASH_NUMBER       = os.environ.get("BKASH_NUMBER", "01997806925")
-NAGAD_NUMBER       = os.environ.get("NAGAD_NUMBER", "01615167610")
+NAGAD_NUMBER       = os.environ.get("NAGAD_NUMBER", "01997806925")
 
 # Status constants
 STATUS_PENDING            = "pending"
@@ -48,8 +48,8 @@ user_conversations = {}
 WAITING_CODE = 1
 
 PRODUCTS = {
-    "chatgpt": {"name": "ChatGPT Plus Business (1 Month)", "price": 150},
-    "gemini":  {"name": "Gemini Pro (1 Month)",       "price": 850},
+    "chatgpt": {"name": "ChatGPT Plus Business (1 Month)", "price": 199},
+    "gemini":  {"name": "Gemini Advanced (1 Month)",       "price": 850},
 }
 
 # =================== DATABASE ===================
@@ -1010,6 +1010,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("setstatus_"):
         parts = data.split("_")
         await update_order_status_btn(query, parts[1], parts[2])
+    elif data.startswith("confirm_remove_reseller_"):
+        # confirm_remove_reseller_{reseller_id}_{code}
+        parts       = data.split("_", 4)   # ['confirm', 'remove', 'reseller', id, code]
+        reseller_id = int(parts[3])
+        code        = parts[4]
+        conn = get_db()
+        try:
+            rows = conn.run("SELECT name, phone FROM resellers WHERE id=:id", id=reseller_id)
+            if not rows:
+                await query.edit_message_text("❌ Reseller পাওয়া যায়নি।",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]])); return
+            name, phone = rows[0][0], rows[0][1]
+            conn.run("DELETE FROM resellers WHERE id=:id", id=reseller_id)
+        finally:
+            conn.close()
+        await query.edit_message_text(
+            f"🗑️ *Reseller বাদ দেওয়া হয়েছে!*\n\n"
+            f"👤 {name} | 📞 {phone} | 🔑 `{code}`\n\n"
+            f"_(এই reseller আর bot এ login করতে পারবে না।)_",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
+            parse_mode="Markdown")
 
 # ── Display helpers ──
 
@@ -1225,6 +1246,56 @@ async def addreseller_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         conn.close()
     await update.message.reply_text(f"✅ Reseller added!\n👤 {name} | 📞 {phone} | 🔑 {code}")
 
+async def removereseller_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "Format: `/removereseller [CODE]`\nExample: `/removereseller RS001`",
+            parse_mode="Markdown"); return
+    code = context.args[0].upper()
+    conn = get_db()
+    try:
+        rows = conn.run(
+            "SELECT id, name, phone FROM resellers WHERE UPPER(reseller_code)=:c", c=code)
+        if not rows:
+            await update.message.reply_text(f"❌ `{code}` নামে কোনো reseller নেই।",
+                parse_mode="Markdown"); return
+        reseller_id   = rows[0][0]
+        reseller_name = rows[0][1]
+        reseller_phone= rows[0][2]
+        # Pending/active orders আছে কিনা check
+        active = conn.run(
+            "SELECT COUNT(*) FROM reseller_bot_orders "
+            "WHERE reseller_id=:rid AND status NOT IN ('completed','rejected')",
+            rid=reseller_id)
+        active_count = active[0][0] if active else 0
+    finally:
+        conn.close()
+
+    if active_count > 0:
+        # Confirm button দেখাও
+        keyboard = [[
+            InlineKeyboardButton(
+                f"⚠️ হ্যাঁ, তারপরেও বাদ দাও",
+                callback_data=f"confirm_remove_reseller_{reseller_id}_{code}"),
+            InlineKeyboardButton("❌ Cancel", callback_data="menu")
+        ]]
+        await update.message.reply_text(
+            f"⚠️ *সতর্কতা!*\n\n"
+            f"👤 {reseller_name} (`{code}`) এর *{active_count}টা active order* আছে!\n\n"
+            f"বাদ দিলে সেই orders এ আর access থাকবে না।\n"
+            f"তারপরেও বাদ দিতে চাও?",
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    else:
+        # সরাসরি বাদ দাও
+        keyboard = [[
+            InlineKeyboardButton(f"✅ হ্যাঁ, বাদ দাও", callback_data=f"confirm_remove_reseller_{reseller_id}_{code}"),
+            InlineKeyboardButton("❌ Cancel", callback_data="menu")
+        ]]
+        await update.message.reply_text(
+            f"🗑️ *Reseller বাদ দেবে?*\n\n"
+            f"👤 {reseller_name} | 📞 {reseller_phone} | 🔑 `{code}`",
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
 async def resellersale_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 4:
         await update.message.reply_text("Format: /rsale [phone] [product] [qty] [price]"); return
@@ -1309,7 +1380,7 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(
             f"📋 *Price List:*\n\n"
             f"🤖 ChatGPT Plus Business (1 Month) — *৳{PRODUCTS['chatgpt']['price']}*\n"
-            f"💎 Gemini Pro (1 Month) — *৳{PRODUCTS['gemini']['price']}*\n\n"
+            f"💎 Gemini Advanced (1 Month) — *৳{PRODUCTS['gemini']['price']}*\n\n"
             f"Order দিতে 'নতুন Order দিব' press koro!",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="res_back")]]),
             parse_mode="Markdown")
@@ -1318,7 +1389,7 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
     if data == "res_new_order":
         keyboard = [
             [InlineKeyboardButton(f"🤖 ChatGPT Plus — ৳{PRODUCTS['chatgpt']['price']}", callback_data="res_order_chatgpt")],
-            [InlineKeyboardButton(f"💎 Gemini Pro — ৳{PRODUCTS['gemini']['price']}", callback_data="res_order_gemini")],
+            [InlineKeyboardButton(f"💎 Gemini Advanced — ৳{PRODUCTS['gemini']['price']}", callback_data="res_order_gemini")],
             [InlineKeyboardButton("🔙 Back", callback_data="res_back")]
         ]
         await query.edit_message_text("🛒 *কোন product order করতে চাও?*",
@@ -1786,8 +1857,9 @@ async def main():
     main_app.add_handler(CommandHandler("start",       start))
     main_app.add_handler(CommandHandler("income",      income_command))
     main_app.add_handler(CommandHandler("customer",    customer_command))
-    main_app.add_handler(CommandHandler("addreseller", addreseller_command))
-    main_app.add_handler(CommandHandler("rsale",       resellersale_command))
+    main_app.add_handler(CommandHandler("addreseller",    addreseller_command))
+    main_app.add_handler(CommandHandler("removereseller", removereseller_command))
+    main_app.add_handler(CommandHandler("rsale",          resellersale_command))
     main_app.add_handler(CallbackQueryHandler(button_handler))
     main_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
