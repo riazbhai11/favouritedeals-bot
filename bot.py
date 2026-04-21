@@ -1249,20 +1249,31 @@ async def addreseller_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def removereseller_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 1:
         await update.message.reply_text(
-            "Format: `/removereseller [CODE]`\nExample: `/removereseller RS001`",
+            "Format:\n"
+            "`/removereseller RS001` — code দিয়ে\n"
+            "`/removereseller 01712345678` — phone দিয়ে",
             parse_mode="Markdown"); return
-    code = context.args[0].upper()
+    query_val = context.args[0].upper()
     conn = get_db()
     try:
-        rows = conn.run(
-            "SELECT id, name, phone FROM resellers WHERE UPPER(reseller_code)=:c", c=code)
+        # phone number হলে digit দিয়ে শুরু
+        if context.args[0][0].isdigit():
+            rows = conn.run(
+                "SELECT id, name, phone, reseller_code FROM resellers WHERE phone=:p",
+                p=context.args[0])
+        else:
+            rows = conn.run(
+                "SELECT id, name, phone, reseller_code FROM resellers WHERE UPPER(reseller_code)=:c",
+                c=query_val)
         if not rows:
-            await update.message.reply_text(f"❌ `{code}` নামে কোনো reseller নেই।",
+            await update.message.reply_text(
+                f"❌ `{context.args[0]}` দিয়ে কোনো reseller পাওয়া যায়নি।\n\n"
+                f"সব reseller দেখতে: /start → Reseller menu",
                 parse_mode="Markdown"); return
-        reseller_id   = rows[0][0]
-        reseller_name = rows[0][1]
-        reseller_phone= rows[0][2]
-        # Pending/active orders আছে কিনা check
+        reseller_id    = rows[0][0]
+        reseller_name  = rows[0][1]
+        reseller_phone = rows[0][2]
+        reseller_code  = rows[0][3] or "N/A"
         active = conn.run(
             "SELECT COUNT(*) FROM reseller_bot_orders "
             "WHERE reseller_id=:rid AND status NOT IN ('completed','rejected')",
@@ -1271,29 +1282,28 @@ async def removereseller_command(update: Update, context: ContextTypes.DEFAULT_T
     finally:
         conn.close()
 
+    safe_code = reseller_code.replace(".", "_")
+    cb_data   = f"confirm_remove_reseller_{reseller_id}_{safe_code}"
+
     if active_count > 0:
-        # Confirm button দেখাও
         keyboard = [[
-            InlineKeyboardButton(
-                f"⚠️ হ্যাঁ, তারপরেও বাদ দাও",
-                callback_data=f"confirm_remove_reseller_{reseller_id}_{code}"),
+            InlineKeyboardButton("⚠️ হ্যাঁ, তারপরেও বাদ দাও", callback_data=cb_data),
             InlineKeyboardButton("❌ Cancel", callback_data="menu")
         ]]
         await update.message.reply_text(
             f"⚠️ *সতর্কতা!*\n\n"
-            f"👤 {reseller_name} (`{code}`) এর *{active_count}টা active order* আছে!\n\n"
+            f"👤 {reseller_name} (`{reseller_code}`) এর *{active_count}টা active order* আছে!\n\n"
             f"বাদ দিলে সেই orders এ আর access থাকবে না।\n"
             f"তারপরেও বাদ দিতে চাও?",
             reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     else:
-        # সরাসরি বাদ দাও
         keyboard = [[
-            InlineKeyboardButton(f"✅ হ্যাঁ, বাদ দাও", callback_data=f"confirm_remove_reseller_{reseller_id}_{code}"),
+            InlineKeyboardButton("✅ হ্যাঁ, বাদ দাও", callback_data=cb_data),
             InlineKeyboardButton("❌ Cancel", callback_data="menu")
         ]]
         await update.message.reply_text(
             f"🗑️ *Reseller বাদ দেবে?*\n\n"
-            f"👤 {reseller_name} | 📞 {reseller_phone} | 🔑 `{code}`",
+            f"👤 {reseller_name} | 📞 {reseller_phone} | 🔑 `{reseller_code}`",
             reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def resellersale_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
