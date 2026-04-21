@@ -36,7 +36,7 @@ PRODUCTS = {
     "gemini": {"name": "Gemini Advanced (1 Month)", "price": 850},
 }
 
-BKASH_NUMBER = "01XXXXXXXXX"  # <-- tomar bkash number eikhane dao
+BKASH_NUMBER = "01841684801"  # <-- tomar bkash number eikhane dao
 
 # =================== DATABASE ===================
 
