@@ -424,21 +424,26 @@ async def notify_reseller(reseller_code, message, parse_mode="Markdown"):
     except Exception as e:
         logger.error(f"Reseller notify error [{reseller_code}]: {e}")
 
-async def send_new_order_notification(order_id, reseller, product_name, customer_email, amount):
+async def send_new_order_notification(order_id, reseller, product_name, customer_email, amount, txn_id=None, payment_method=None):
     """
     Reseller bot এ order → main bot এ admin কে notification।
     Admin দেখবে: Approve (account দেব) / Reject।
     """
     try:
         from telegram import Bot
+        txn_line = ""
+        if txn_id and txn_id != "LATER":
+            method_label = "Nagad" if payment_method == "nagad" else "Bkash"
+            txn_line = f"💳 {method_label} TxnID: `{txn_id}`\n"
         msg = (
             f"🔔 *নতুন Reseller Order!*\n\n"
             f"👤 {reseller['name']}  (`{reseller['code']}`)\n"
             f"📦 {product_name}\n"
             f"📧 Customer Email: `{customer_email}`\n"
             f"💵 Amount: ৳{amount}\n"
+            f"{txn_line}"
             f"🆔 Order #{order_id}\n\n"
-            f"Stock আছে হলে Approve করো — Invitation পাঠাও।"
+            f"Stock আছে + টাকা পেলে Approve করো।"
         )
         keyboard = [[
             InlineKeyboardButton("✅ Approve করব",  callback_data=f"rapprove_{order_id}"),
@@ -1411,9 +1416,12 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
             except Exception as e:
                 logger.error(f"Reseller payment due notify error: {e}")
 
-            # Admin কে জানাও
+            # Admin কে জানাও + remind button
             try:
                 from telegram import Bot
+                admin_keyboard = [[
+                    InlineKeyboardButton("📩 Remind পাঠাও", callback_data=f"rsend_reminder_{order_id}")
+                ]]
                 await Bot(token=BOT_TOKEN).send_message(
                     chat_id=MAIN_CHAT_ID,
                     text=(
@@ -1424,6 +1432,7 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
                         f"💵 ৳{order['amount']}\n\n"
                         f"Client account confirm করেছে। Payment এর জন্য অপেক্ষা।"
                     ),
+                    reply_markup=InlineKeyboardMarkup(admin_keyboard),
                     parse_mode="Markdown"
                 )
             except Exception as e:
@@ -1479,8 +1488,7 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
             f"💵 Amount: ৳{order['amount']}\n\n"
             f"📱 Number: *{number}* ({number_label})\n\n"
             f"Payment এর পর *Transaction ID* দাও:\n"
-            f"_(Format: `TxnID OrderNumber ResellerCode`)_\n"
-            f"_(Example: `8N6A7B3X2Y {order_id} {code}`)_",
+            f"_(Example: `8N6A7B3X2Y`)_",
             parse_mode="Markdown")
 
     elif data == "res_back":
@@ -1528,8 +1536,7 @@ async def reseller_pay_method_handler(update: Update, context: ContextTypes.DEFA
         f"📦 {product}\n💵 Amount: ৳{amount_val}\n\n"
         f"📱 Number: *{number}* ({number_label})\n\n"
         f"Payment এর পর *Transaction ID* দাও:\n"
-        f"_(Format: `TxnID OrderNumber {code}`)_\n"
-        f"_(Example: `8N6A7B3X2Y 10 {code}`)_",
+        f"_(Example: `8N6A7B3X2Y`)_",
         parse_mode="Markdown")
 
 async def reseller_handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1582,7 +1589,7 @@ async def reseller_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
         order_id = rows[0][0] if rows else None
         if order_id:
             reseller_user_data[chat_id]["state"] = None
-            await send_new_order_notification(order_id, reseller, product, email, amount)
+            await send_new_order_notification(order_id, reseller, product, email, amount, txn_id=text, payment_method=method)
             await update.message.reply_text(
                 f"✅ *Order Submit হয়েছে!*\n\n"
                 f"🆔 Order #{order_id}\n📦 {product}\n📧 {email}\n"
