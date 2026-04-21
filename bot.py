@@ -36,8 +36,8 @@ WAITING_EMAIL = 2
 WAITING_TRANSACTION = 3
 
 PRODUCTS = {
-    "chatgpt": {"name": "ChatGPT Plus (1 Month)", "price": 1200},
-    "gemini": {"name": "Gemini Advanced (1 Month)", "price": 1000},
+    "chatgpt": {"name": "ChatGPT Plus (1 Month)", "price": 199},
+    "gemini": {"name": "Gemini Advanced (1 Month)", "price": 850},
 }
 
 # =================== DATABASE ===================
