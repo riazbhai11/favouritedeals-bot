@@ -1234,7 +1234,31 @@ async def customer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += f"\n💰 *মোট: ৳{total_spent:.2f}*"
     await update.message.reply_text(text, parse_mode="Markdown")
 
-async def addreseller_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def listresellers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """সব reseller list করো ID সহ — remove এর জন্য"""
+    conn = get_db()
+    try:
+        rows = conn.run(
+            "SELECT id, name, phone, reseller_code FROM resellers ORDER BY id")
+    finally:
+        conn.close()
+    if not rows:
+        await update.message.reply_text("কোনো reseller নেই।"); return
+    text = "👥 *সব Reseller (ID সহ):*\n\n"
+    keyboard = []
+    for r in rows:
+        rid, name, phone, code = r[0], r[1], r[2], r[3] or "N/A"
+        text += f"🔸 ID:`{rid}` — *{name}* | 📞`{phone}` | 🔑`{code}`\n"
+        keyboard.append([
+            InlineKeyboardButton(
+                f"🗑️ {name} ({code}) বাদ দাও",
+                callback_data=f"confirm_remove_reseller_{rid}_ID{rid}")
+        ])
+    keyboard.append([InlineKeyboardButton("🔙 Menu", callback_data="menu")])
+    await update.message.reply_text(
+        text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+
     if len(context.args) < 3:
         await update.message.reply_text("Format: /addreseller [naam] [phone] [CODE]"); return
     name, phone, code = context.args[0], context.args[1], context.args[2].upper()
@@ -1869,6 +1893,7 @@ async def main():
     main_app.add_handler(CommandHandler("customer",    customer_command))
     main_app.add_handler(CommandHandler("addreseller",    addreseller_command))
     main_app.add_handler(CommandHandler("removereseller", removereseller_command))
+    main_app.add_handler(CommandHandler("listresellers",  listresellers_command))
     main_app.add_handler(CommandHandler("rsale",          resellersale_command))
     main_app.add_handler(CallbackQueryHandler(button_handler))
     main_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
