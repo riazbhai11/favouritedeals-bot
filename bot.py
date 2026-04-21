@@ -32,7 +32,7 @@ WC_SECRET          = os.environ.get("WC_SECRET")
 OPENAI_KEY         = os.environ.get("OPENAI_API_KEY")
 RESELLER_BOT_TOKEN = os.environ.get("RESELLER_BOT_TOKEN")
 BKASH_NUMBER       = os.environ.get("BKASH_NUMBER", "01997806925")
-NAGAD_NUMBER       = os.environ.get("NAGAD_NUMBER", "01997806925")
+NAGAD_NUMBER       = os.environ.get("NAGAD_NUMBER", "01615167610")
 
 # Status constants
 STATUS_PENDING            = "pending"
@@ -48,8 +48,8 @@ user_conversations = {}
 WAITING_CODE = 1
 
 PRODUCTS = {
-    "chatgpt": {"name": "ChatGPT Plus Business (1 Month)", "price": 199},
-    "gemini":  {"name": "Gemini Advanced (1 Month)",       "price": 850},
+    "chatgpt": {"name": "ChatGPT Plus Business (1 Month)", "price": 150},
+    "gemini":  {"name": "Gemini Pro (1 Month)",       "price": 850},
 }
 
 # =================== DATABASE ===================
