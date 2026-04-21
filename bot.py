@@ -1309,7 +1309,7 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(
             f"📋 *Price List:*\n\n"
             f"🤖 ChatGPT Plus Business (1 Month) — *৳{PRODUCTS['chatgpt']['price']}*\n"
-            f"💎 Gemini Advanced (1 Month) — *৳{PRODUCTS['gemini']['price']}*\n\n"
+            f"💎 Gemini Pro (1 Month) — *৳{PRODUCTS['gemini']['price']}*\n\n"
             f"Order দিতে 'নতুন Order দিব' press koro!",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="res_back")]]),
             parse_mode="Markdown")
@@ -1318,7 +1318,7 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
     if data == "res_new_order":
         keyboard = [
             [InlineKeyboardButton(f"🤖 ChatGPT Plus — ৳{PRODUCTS['chatgpt']['price']}", callback_data="res_order_chatgpt")],
-            [InlineKeyboardButton(f"💎 Gemini Advanced — ৳{PRODUCTS['gemini']['price']}", callback_data="res_order_gemini")],
+            [InlineKeyboardButton(f"💎 Gemini Pro — ৳{PRODUCTS['gemini']['price']}", callback_data="res_order_gemini")],
             [InlineKeyboardButton("🔙 Back", callback_data="res_back")]
         ]
         await query.edit_message_text("🛒 *কোন product order করতে চাও?*",
