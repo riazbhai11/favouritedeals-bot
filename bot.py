@@ -22,7 +22,7 @@ CHAT_ID = os.environ.get("CHAT_ID")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 WC_KEY = os.environ.get("WC_KEY")
 WC_SECRET = os.environ.get("WC_SECRET")
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
+OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
 
 app = Flask(__name__)
 main_loop = None
@@ -125,7 +125,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 মেনু দেখতে /start লেখো বলো।"""
 
     try:
-        OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
         response = req.post(
             "https://api.openai.com/v1/chat/completions",
             headers={
@@ -142,15 +141,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             },
             timeout=10
         )
-        reply = response.json()['choices'][0]['message']['content']
+        resp_json = response.json()
+        if 'choices' in resp_json:
+            reply = resp_json['choices'][0]['message']['content']
         elif 'error' in resp_json:
-            logger.error(f"Gemini API error: {resp_json['error']}")
+            logger.error(f"OpenAI error: {resp_json['error']}")
             reply = "দুঃখিত, AI সাড়া দিচ্ছে না।"
         else:
-            logger.error(f"Gemini unknown response: {resp_json}")
+            logger.error(f"OpenAI unknown: {resp_json}")
             reply = "দুঃখিত, AI সাড়া দিচ্ছে না।"
     except Exception as e:
-        logger.error(f"Gemini error: {e}")
+        logger.error(f"OpenAI error: {e}")
         reply = "দুঃখিত, এখন উত্তর দিতে পারছি না। মেনুর জন্য /start দাও।"
 
     await update.message.reply_text(reply)
