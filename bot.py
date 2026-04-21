@@ -125,14 +125,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 মেনু দেখতে /start লেখো বলো।"""
 
     try:
+        OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
         response = req.post(
-           f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-latest:generateContent?key={GEMINI_KEY}",
-            json={"contents": [{"parts": [{"text": f"{system_context}\n\nপ্রশ্ন: {text}"}]}]},
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENAI_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {"role": "system", "content": system_context},
+                    {"role": "user", "content": text}
+                ],
+                "max_tokens": 500
+            },
             timeout=10
         )
-        resp_json = response.json()
-        if 'candidates' in resp_json:
-            reply = resp_json['candidates'][0]['content']['parts'][0]['text']
+        reply = response.json()['choices'][0]['message']['content']
         elif 'error' in resp_json:
             logger.error(f"Gemini API error: {resp_json['error']}")
             reply = "দুঃখিত, AI সাড়া দিচ্ছে না।"
