@@ -33,6 +33,8 @@ OPENAI_KEY         = os.environ.get("OPENAI_API_KEY")
 RESELLER_BOT_TOKEN = os.environ.get("RESELLER_BOT_TOKEN")
 BKASH_NUMBER       = os.environ.get("BKASH_NUMBER", "01997806925")
 NAGAD_NUMBER       = os.environ.get("NAGAD_NUMBER", "01997806925")
+WP_URL             = os.environ.get("WP_URL", "https://favouritedeals.online")
+WP_PAYLATER_SECRET = os.environ.get("WP_PAYLATER_SECRET", "")
 
 # Status constants
 STATUS_PENDING            = "pending"
@@ -1352,6 +1354,85 @@ async def resellersale_command(update: Update, context: ContextTypes.DEFAULT_TYP
     except:
         await update.message.reply_text("❌ ভুল format!")
 
+def _wp_paylater_api(method, endpoint, email=None):
+    """WordPress Pay Later API call"""
+    url     = f"{WP_URL}/wp-json/fdbot/v1/paylater/{endpoint}"
+    headers = {"X-FD-Secret": WP_PAYLATER_SECRET}
+    try:
+        if method == "GET":
+            resp = req.get(url, headers=headers, timeout=10)
+        else:
+            resp = req.post(url, headers=headers, json={"email": email}, timeout=10)
+        return resp.json()
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+async def paylater_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "Format: `/paylater add example@gmail.com`", parse_mode="Markdown"); return
+    email  = context.args[0].lower().strip()
+    result = _wp_paylater_api("POST", "add", email)
+    if result.get("success"):
+        await update.message.reply_text(
+            f"✅ *Pay Later চালু হয়েছে!*\n\n📧 `{email}`\n\n"
+            f"এখন এই email দিয়ে website এ Pay Later use করতে পারবে।",
+            parse_mode="Markdown")
+    elif result.get("message") == "Already exists":
+        await update.message.reply_text(
+            f"ℹ️ `{email}` আগে থেকেই approved আছে।", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(
+            f"❌ Error: {result.get('message', 'Unknown error')}")
+
+async def paylater_remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "Format: `/paylater remove example@gmail.com`", parse_mode="Markdown"); return
+    email  = context.args[0].lower().strip()
+    result = _wp_paylater_api("POST", "remove", email)
+    if result.get("success"):
+        await update.message.reply_text(
+            f"🗑️ *Pay Later বাদ দেওয়া হয়েছে!*\n\n📧 `{email}`",
+            parse_mode="Markdown")
+    else:
+        await update.message.reply_text(
+            f"❌ `{email}` পাওয়া যায়নি।", parse_mode="Markdown")
+
+async def paylater_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    result = _wp_paylater_api("GET", "list")
+    if not result.get("success"):
+        await update.message.reply_text(f"❌ Error: {result.get('message')}"); return
+    emails = result.get("emails", [])
+    if not emails:
+        await update.message.reply_text("📋 কোনো approved email নেই।"); return
+    text = f"📋 *Approved Pay Later Emails ({len(emails)}টা):*\n\n"
+    for i, e in enumerate(emails, 1):
+        text += f"{i}. `{e}`\n"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def paylater_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Main /paylater command router"""
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "📋 *Pay Later Commands:*\n\n"
+            "`/paylater add email@gmail.com` — approve করো\n"
+            "`/paylater remove email@gmail.com` — বাদ দাও\n"
+            "`/paylater list` — সব approved emails দেখো",
+            parse_mode="Markdown"); return
+    sub = context.args[0].lower()
+    # shift args
+    context.args = context.args[1:]
+    if sub == "add":
+        await paylater_add_command(update, context)
+    elif sub == "remove":
+        await paylater_remove_command(update, context)
+    elif sub == "list":
+        await paylater_list_command(update, context)
+    else:
+        await update.message.reply_text(
+            "❌ Unknown subcommand। Use: `add`, `remove`, `list`", parse_mode="Markdown")
+
 # =================== RESELLER BOT ===================
 
 reseller_user_data: dict = {}
@@ -1898,6 +1979,7 @@ async def main():
     main_app.add_handler(CommandHandler("removereseller", removereseller_command))
     main_app.add_handler(CommandHandler("listresellers",  listresellers_command))
     main_app.add_handler(CommandHandler("rsale",          resellersale_command))
+    main_app.add_handler(CommandHandler("paylater",       paylater_command))
     main_app.add_handler(CallbackQueryHandler(button_handler))
     main_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
