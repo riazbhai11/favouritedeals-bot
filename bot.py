@@ -1022,6 +1022,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ Reseller পাওয়া যায়নি।",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]])); return
             name, phone = rows[0][0], rows[0][1]
+            # Foreign key constraint fix — আগে orders এর reseller_id NULL করো
+            conn.run("UPDATE reseller_bot_orders SET reseller_id=NULL WHERE reseller_id=:id", id=reseller_id)
+            conn.run("UPDATE reseller_orders SET reseller_id=NULL WHERE reseller_id=:id", id=reseller_id)
             conn.run("DELETE FROM resellers WHERE id=:id", id=reseller_id)
         finally:
             conn.close()
