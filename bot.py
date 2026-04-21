@@ -260,7 +260,11 @@ def execute_function(name, args):
         elif name == "get_last_order":
             return db_get_last_order()
         elif name == "update_order_status":
-            success, result = db_update_order_status(args["order_id"], args["new_status"], args.get("use_woo_id", False))
+            # First try with woo_id, then with db id
+            success, result = db_update_order_status(args["order_id"], args["new_status"], use_woo_id=True)
+            if not success:
+                success, result = db_update_order_status(args["order_id"], args["new_status"], use_woo_id=False)
+            return {"success": success, "result": result}
             return {"success": success, "result": result}
         elif name == "get_income_summary":
             return db_get_income_summary(args.get("days", 1))
