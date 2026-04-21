@@ -1258,7 +1258,7 @@ async def listresellers_command(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(
         text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-
+async def addreseller_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 3:
         await update.message.reply_text("Format: /addreseller [naam] [phone] [CODE]"); return
     name, phone, code = context.args[0], context.args[1], context.args[2].upper()
