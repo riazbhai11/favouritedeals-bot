@@ -1374,79 +1374,124 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="res_back")])
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-    # ── ③ Client পেয়েছে — payment_due শুরু ──
+    # ── ③ Client পেয়েছে ──
     elif data.startswith("res_client_got_"):
         order_id = int(data.split("_")[3])
         order    = get_reseller_bot_order(order_id)
         if order:
-            conn = get_db()
-            try:
-                conn.run(
-                    "UPDATE reseller_bot_orders SET status='payment_due', payment_due_at=NOW() WHERE id=:id",
-                    id=order_id)
-            finally:
-                conn.close()
-            # Reseller কে জানাও payment_due — with payment button
-            try:
-                conn2 = get_db()
+            already_paid = order.get("transaction_id") and order["transaction_id"] != "LATER"
+
+            if already_paid:
+                # ─ আগেই TxnID দিয়েছে → Admin verify করবে → complete করবে
+                conn = get_db()
                 try:
-                    rrows = conn2.run(
-                        "SELECT telegram_chat_id FROM resellers WHERE UPPER(reseller_code)=UPPER(:c)",
-                        c=order["reseller_code"])
+                    conn.run(
+                        "UPDATE reseller_bot_orders SET status='payment_due', payment_due_at=NOW() WHERE id=:id",
+                        id=order_id)
                 finally:
-                    conn2.close()
-                if rrows and rrows[0][0]:
+                    conn.close()
+                # Admin কে verify করতে বলো
+                try:
                     from telegram import Bot
-                    pay_keyboard = [[
-                        InlineKeyboardButton("💳 Payment করব", callback_data=f"res_pay_order_{order_id}")
+                    txn = order["transaction_id"]
+                    method_label = "Nagad" if order.get("payment_method") == "nagad" else "Bkash"
+                    admin_keyboard = [[
+                        InlineKeyboardButton("✅ টাকা পেয়েছি — Complete", callback_data=f"rcomplete_{order_id}"),
+                        InlineKeyboardButton("❌ TxnID ভুল", callback_data=f"rwrong_txn_{order_id}")
                     ]]
-                    await Bot(token=RESELLER_BOT_TOKEN).send_message(
-                        chat_id=rrows[0][0],
+                    await Bot(token=BOT_TOKEN).send_message(
+                        chat_id=MAIN_CHAT_ID,
+                        text=(
+                            f"✅ *Client Account Confirm করেছে!*\n\n"
+                            f"Reseller: `{order['reseller_code']}`\n"
+                            f"Order #{order_id} — {order['product']}\n"
+                            f"📧 {order['customer_email']}\n"
+                            f"💵 ৳{order['amount']}\n\n"
+                            f"💳 {method_label} TxnID: `{txn}`\n\n"
+                            f"TxnID check করে complete করো 👇"
+                        ),
+                        reply_markup=InlineKeyboardMarkup(admin_keyboard),
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    logger.error(f"Admin txn verify notify error: {e}")
+
+                await query.edit_message_text(
+                    f"✅ *Confirmed!*\n\n"
+                    f"Order #{order_id} — Client account পেয়েছে।\n\n"
+                    f"তুমি আগেই payment করেছিলে। Admin TxnID verify করে complete করবে। Notify করব!",
+                    reply_markup=reseller_main_menu(), parse_mode="Markdown")
+
+            else:
+                # ─ এখনো payment করেনি → payment_due শুরু
+                conn = get_db()
+                try:
+                    conn.run(
+                        "UPDATE reseller_bot_orders SET status='payment_due', payment_due_at=NOW() WHERE id=:id",
+                        id=order_id)
+                finally:
+                    conn.close()
+                # Reseller কে payment button দাও
+                try:
+                    conn2 = get_db()
+                    try:
+                        rrows = conn2.run(
+                            "SELECT telegram_chat_id FROM resellers WHERE UPPER(reseller_code)=UPPER(:c)",
+                            c=order["reseller_code"])
+                    finally:
+                        conn2.close()
+                    if rrows and rrows[0][0]:
+                        from telegram import Bot
+                        pay_keyboard = [[
+                            InlineKeyboardButton("💳 Payment করব", callback_data=f"res_pay_order_{order_id}")
+                        ]]
+                        await Bot(token=RESELLER_BOT_TOKEN).send_message(
+                            chat_id=rrows[0][0],
+                            text=(
+                                f"💰 *Payment Due শুরু হয়েছে!*\n\n"
+                                f"Reseller: `{order['reseller_code']}`\n"
+                                f"Order #{order_id} — {order['product']}\n"
+                                f"📧 {order['customer_email']}\n"
+                                f"💵 ৳{order['amount']}\n\n"
+                                f"Client account confirm করেছে। এখন payment করো 👇"
+                            ),
+                            reply_markup=InlineKeyboardMarkup(pay_keyboard),
+                            parse_mode="Markdown"
+                        )
+                except Exception as e:
+                    logger.error(f"Reseller payment due notify error: {e}")
+
+                # Admin কে জানাও + remind button
+                try:
+                    from telegram import Bot
+                    admin_keyboard = [[
+                        InlineKeyboardButton("📩 Remind পাঠাও", callback_data=f"rsend_reminder_{order_id}")
+                    ]]
+                    await Bot(token=BOT_TOKEN).send_message(
+                        chat_id=MAIN_CHAT_ID,
                         text=(
                             f"💰 *Payment Due শুরু হয়েছে!*\n\n"
                             f"Reseller: `{order['reseller_code']}`\n"
                             f"Order #{order_id} — {order['product']}\n"
                             f"📧 {order['customer_email']}\n"
                             f"💵 ৳{order['amount']}\n\n"
-                            f"Client account confirm করেছে। এখন payment করো 👇"
+                            f"Client account confirm করেছে। Payment এর জন্য অপেক্ষা।"
                         ),
-                        reply_markup=InlineKeyboardMarkup(pay_keyboard),
+                        reply_markup=InlineKeyboardMarkup(admin_keyboard),
                         parse_mode="Markdown"
                     )
-            except Exception as e:
-                logger.error(f"Reseller payment due notify error: {e}")
+                except Exception as e:
+                    logger.error(f"Admin payment due notify error: {e}")
 
-            # Admin কে জানাও + remind button
-            try:
-                from telegram import Bot
-                admin_keyboard = [[
-                    InlineKeyboardButton("📩 Remind পাঠাও", callback_data=f"rsend_reminder_{order_id}")
+                # Confirmed message + payment button
+                confirmed_keyboard = [[
+                    InlineKeyboardButton("💳 Payment করব", callback_data=f"res_pay_order_{order_id}")
                 ]]
-                await Bot(token=BOT_TOKEN).send_message(
-                    chat_id=MAIN_CHAT_ID,
-                    text=(
-                        f"💰 *Payment Due শুরু হয়েছে!*\n\n"
-                        f"Reseller: `{order['reseller_code']}`\n"
-                        f"Order #{order_id} — {order['product']}\n"
-                        f"📧 {order['customer_email']}\n"
-                        f"💵 ৳{order['amount']}\n\n"
-                        f"Client account confirm করেছে। Payment এর জন্য অপেক্ষা।"
-                    ),
-                    reply_markup=InlineKeyboardMarkup(admin_keyboard),
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                logger.error(f"Admin payment due notify error: {e}")
-
-            # Reseller কে Confirmed message + payment button
-            confirmed_keyboard = [[
-                InlineKeyboardButton("💳 Payment করব", callback_data=f"res_pay_order_{order_id}")
-            ]]
-            await query.edit_message_text(
-                f"✅ *Confirmed!*\n\n"
-                f"Order #{order_id} — Client account পেয়েছে বলে mark হয়েছে।\n\n"
-                f"এখন payment করো 👇",
-                reply_markup=InlineKeyboardMarkup(confirmed_keyboard), parse_mode="Markdown")
+                await query.edit_message_text(
+                    f"✅ *Confirmed!*\n\n"
+                    f"Order #{order_id} — Client account পেয়েছে বলে mark হয়েছে।\n\n"
+                    f"এখন payment করো 👇",
+                    reply_markup=InlineKeyboardMarkup(confirmed_keyboard), parse_mode="Markdown")
 
     # ── ⑤ Payment করব — method select ──
     elif data.startswith("res_pay_order_"):
