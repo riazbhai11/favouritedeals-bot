@@ -32,7 +32,7 @@ WC_SECRET          = os.environ.get("WC_SECRET")
 OPENAI_KEY         = os.environ.get("OPENAI_API_KEY")
 RESELLER_BOT_TOKEN = os.environ.get("RESELLER_BOT_TOKEN")
 BKASH_NUMBER       = os.environ.get("BKASH_NUMBER", "01997806925")
-NAGAD_NUMBER       = os.environ.get("NAGAD_NUMBER", "01615167610")
+NAGAD_NUMBER       = os.environ.get("NAGAD_NUMBER", "01997806925")
 
 # Status constants
 STATUS_PENDING            = "pending"
@@ -453,15 +453,34 @@ async def send_new_order_notification(order_id, reseller, product_name, customer
 
 async def send_account_delivered_to_reseller(order_id, reseller_code, product, customer_email, amount):
     """Admin account দিল → reseller কে জানাও"""
-    await notify_reseller(
-        reseller_code,
-        f"🎉 *Account Delivered!*\n\n"
-        f"Order #{order_id} — *{product}*\n"
-        f"📧 Customer Email: `{customer_email}`\n\n"
-        f"✅ Invitation পাঠানো হয়েছে!\n"
-        f"Client কে জিজ্ঞেস করো account পেয়েছে কিনা।\n\n"
-        f"Client confirm করলে নিচের button press করো 👇"
-    )
+    try:
+        conn = get_db()
+        try:
+            rows = conn.run(
+                "SELECT telegram_chat_id FROM resellers WHERE UPPER(reseller_code)=UPPER(:c)",
+                c=reseller_code)
+        finally:
+            conn.close()
+        if rows and rows[0][0]:
+            from telegram import Bot
+            keyboard = [[
+                InlineKeyboardButton("✅ Client পেয়েছে!", callback_data=f"res_client_got_{order_id}")
+            ]]
+            await Bot(token=RESELLER_BOT_TOKEN).send_message(
+                chat_id=rows[0][0],
+                text=(
+                    f"🎉 *Account Delivered!*\n\n"
+                    f"Order #{order_id} — *{product}*\n"
+                    f"📧 Customer Email: `{customer_email}`\n\n"
+                    f"✅ Invitation পাঠানো হয়েছে!\n"
+                    f"Client কে জিজ্ঞেস করো account পেয়েছে কিনা।\n\n"
+                    f"Client confirm করলে নিচের button press করো 👇"
+                ),
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown"
+            )
+    except Exception as e:
+        logger.error(f"Account delivered notify error [{reseller_code}]: {e}")
 
 async def send_payment_check_to_admin(order_id, reseller_code, txn_id, payment_method, amount):
     """Reseller payment করল → admin কে verify করতে বলো"""
@@ -505,17 +524,35 @@ async def send_payment_reminders():
 
                 count = order["reminder_count"] + 1
 
-                # Reseller কে remind
-                await notify_reseller(
-                    order["reseller_code"],
-                    f"⏰ *Payment Reminder #{count}*\n\n"
-                    f"Bhai, tomar order #{order['id']} er account already deliver hoye geche!\n"
-                    f"Kintu payment ekhono baaki ache.\n\n"
-                    f"📦 {order['product']}\n"
-                    f"💵 Amount: ৳{order['amount']}\n\n"
-                    f"Joto taratari payment korbe toto valo. "
-                    f"'Amar Orders' → '💳 Payment Korbo' button press koro!"
-                )
+                # Reseller কে remind — with payment button
+                try:
+                    conn3 = get_db()
+                    try:
+                        rr = conn3.run(
+                            "SELECT telegram_chat_id FROM resellers WHERE UPPER(reseller_code)=UPPER(:c)",
+                            c=order["reseller_code"])
+                    finally:
+                        conn3.close()
+                    if rr and rr[0][0]:
+                        from telegram import Bot as TBot
+                        remind_keyboard = [[
+                            InlineKeyboardButton("💳 Payment করব", callback_data=f"res_pay_order_{order['id']}")
+                        ]]
+                        await TBot(token=RESELLER_BOT_TOKEN).send_message(
+                            chat_id=rr[0][0],
+                            text=(
+                                f"⏰ *Payment Reminder #{count}*\n\n"
+                                f"Bhai, tomar order #{order['id']} er account already deliver hoye geche!\n"
+                                f"Kintu payment ekhono baaki ache.\n\n"
+                                f"📦 {order['product']}\n"
+                                f"💵 Amount: ৳{order['amount']}\n\n"
+                                f"Joto taratari payment korbe toto valo 👇"
+                            ),
+                            reply_markup=InlineKeyboardMarkup(remind_keyboard),
+                            parse_mode="Markdown"
+                        )
+                except Exception as e:
+                    logger.error(f"Reseller reminder notify error: {e}")
 
                 # Admin কে remind + manual message পাঠানোর button
                 try:
@@ -1344,10 +1381,39 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
                     id=order_id)
             finally:
                 conn.close()
+            # Reseller কে জানাও payment_due — with payment button
+            try:
+                conn2 = get_db()
+                try:
+                    rrows = conn2.run(
+                        "SELECT telegram_chat_id FROM resellers WHERE UPPER(reseller_code)=UPPER(:c)",
+                        c=order["reseller_code"])
+                finally:
+                    conn2.close()
+                if rrows and rrows[0][0]:
+                    from telegram import Bot
+                    pay_keyboard = [[
+                        InlineKeyboardButton("💳 Payment করব", callback_data=f"res_pay_order_{order_id}")
+                    ]]
+                    await Bot(token=RESELLER_BOT_TOKEN).send_message(
+                        chat_id=rrows[0][0],
+                        text=(
+                            f"💰 *Payment Due শুরু হয়েছে!*\n\n"
+                            f"Reseller: `{order['reseller_code']}`\n"
+                            f"Order #{order_id} — {order['product']}\n"
+                            f"📧 {order['customer_email']}\n"
+                            f"💵 ৳{order['amount']}\n\n"
+                            f"Client account confirm করেছে। এখন payment করো 👇"
+                        ),
+                        reply_markup=InlineKeyboardMarkup(pay_keyboard),
+                        parse_mode="Markdown"
+                    )
+            except Exception as e:
+                logger.error(f"Reseller payment due notify error: {e}")
+
             # Admin কে জানাও
             try:
                 from telegram import Bot
-                reseller = get_reseller_by_chat_id(chat_id)
                 await Bot(token=BOT_TOKEN).send_message(
                     chat_id=MAIN_CHAT_ID,
                     text=(
@@ -1361,14 +1427,17 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
                     parse_mode="Markdown"
                 )
             except Exception as e:
-                logger.error(f"Payment due notify error: {e}")
+                logger.error(f"Admin payment due notify error: {e}")
 
+            # Reseller কে Confirmed message + payment button
+            confirmed_keyboard = [[
+                InlineKeyboardButton("💳 Payment করব", callback_data=f"res_pay_order_{order_id}")
+            ]]
             await query.edit_message_text(
                 f"✅ *Confirmed!*\n\n"
                 f"Order #{order_id} — Client account পেয়েছে বলে mark হয়েছে।\n\n"
-                f"এখন payment করো:\n"
-                f"'আমার Orders' → '💳 Payment করব' button press করো।",
-                reply_markup=reseller_main_menu(), parse_mode="Markdown")
+                f"এখন payment করো 👇",
+                reply_markup=InlineKeyboardMarkup(confirmed_keyboard), parse_mode="Markdown")
 
     # ── ⑤ Payment করব — method select ──
     elif data.startswith("res_pay_order_"):
@@ -1402,14 +1471,16 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
             reseller_user_data[chat_id]["paying_order_id"] = order_id
             reseller_user_data[chat_id]["state"]           = "waiting_due_txn"
         order = get_reseller_bot_order(order_id)
-        code  = reseller["code"] if reseller else "CODE"
+        code  = reseller["code"] if reseller else "RSCODE"
+        number_label = "Send Money" if method == "nagad" else "Payment/Merchant Number"
         await query.edit_message_text(
             f"💳 *{method.upper()} Payment*\n\n"
             f"📦 {order['product']}\n"
             f"💵 Amount: ৳{order['amount']}\n\n"
-            f"📱 Number: *{number}* (Send Money)\n\n"
+            f"📱 Number: *{number}* ({number_label})\n\n"
             f"Payment এর পর *Transaction ID* দাও:\n"
-            f"_(Example: 8N6A7B3X2Y)_",
+            f"_(Format: `TxnID OrderNumber ResellerCode`)_\n"
+            f"_(Example: `8N6A7B3X2Y {order_id} {code}`)_",
             parse_mode="Markdown")
 
     elif data == "res_back":
@@ -1448,11 +1519,17 @@ async def reseller_pay_method_handler(update: Update, context: ContextTypes.DEFA
         reseller_user_data[chat_id]["state"]          = "waiting_transaction"
     amount  = reseller_user_data.get(chat_id, {}).get("amount", "?")
     product = reseller_user_data.get(chat_id, {}).get("product_name", "")
+    reseller = get_reseller_by_chat_id(chat_id)
+    code  = reseller["code"] if reseller else "RSCODE"
+    amount_val = reseller_user_data.get(chat_id, {}).get("amount", "?")
+    number_label = "Send Money" if method == "nagad" else "Payment/Merchant Number"
     await query.edit_message_text(
         f"💳 *{method.upper()} Payment*\n\n"
-        f"📦 {product}\n💵 Amount: ৳{amount}\n\n"
-        f"📱 Number: *{number}* (Send Money)\n\n"
-        f"Payment এর পর *Transaction ID* দাও:\n_(Example: 8N6A7B3X2Y)_",
+        f"📦 {product}\n💵 Amount: ৳{amount_val}\n\n"
+        f"📱 Number: *{number}* ({number_label})\n\n"
+        f"Payment এর পর *Transaction ID* দাও:\n"
+        f"_(Format: `TxnID OrderNumber {code}`)_\n"
+        f"_(Example: `8N6A7B3X2Y 10 {code}`)_",
         parse_mode="Markdown")
 
 async def reseller_handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
