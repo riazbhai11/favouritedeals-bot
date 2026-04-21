@@ -19,11 +19,15 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
+MAIN_CHAT_ID = os.environ.get("CHAT_ID")   # ✅ FIX: top-level এ define করা হলো
 DATABASE_URL = os.environ.get("DATABASE_URL")
 WC_KEY = os.environ.get("WC_KEY")
 WC_SECRET = os.environ.get("WC_SECRET")
 OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
 RESELLER_BOT_TOKEN = os.environ.get("RESELLER_BOT_TOKEN")
+
+# ✅ FIX: BKASH_NUMBER env থেকে নেওয়া হলো, fallback হিসেবে আসল নম্বর দেওয়া আছে
+BKASH_NUMBER = os.environ.get("BKASH_NUMBER", "01997806925")
 
 app = Flask(__name__)
 main_loop = None
@@ -35,8 +39,6 @@ PRODUCTS = {
     "chatgpt": {"name": "ChatGPT Plus (1 Month)", "price": 199},
     "gemini": {"name": "Gemini Advanced (1 Month)", "price": 850},
 }
-
-BKASH_NUMBER = "01841684801"  # <-- tomar bkash number eikhane dao
 
 # =================== DATABASE ===================
 
@@ -55,34 +57,36 @@ def get_db():
 
 def setup_db():
     conn = get_db()
-    conn.run("""CREATE TABLE IF NOT EXISTS orders (
-        id SERIAL PRIMARY KEY, woo_order_id VARCHAR(50),
-        customer_name VARCHAR(200), customer_email VARCHAR(200),
-        total DECIMAL(10,2), status VARCHAR(50), items TEXT,
-        created_at TIMESTAMP DEFAULT NOW())""")
-    conn.run("""CREATE TABLE IF NOT EXISTS income (
-        id SERIAL PRIMARY KEY, amount DECIMAL(10,2), note TEXT,
-        type VARCHAR(20) DEFAULT 'manual', created_at TIMESTAMP DEFAULT NOW())""")
-    conn.run("""CREATE TABLE IF NOT EXISTS resellers (
-        id SERIAL PRIMARY KEY, name VARCHAR(200), phone VARCHAR(50),
-        reseller_code VARCHAR(20), telegram_chat_id VARCHAR(50),
-        created_at TIMESTAMP DEFAULT NOW())""")
-    conn.run("""CREATE TABLE IF NOT EXISTS reseller_orders (
-        id SERIAL PRIMARY KEY, reseller_id INTEGER REFERENCES resellers(id),
-        product TEXT, quantity INTEGER, price DECIMAL(10,2),
-        created_at TIMESTAMP DEFAULT NOW())""")
-    conn.run("""CREATE TABLE IF NOT EXISTS reseller_bot_orders (
-        id SERIAL PRIMARY KEY, reseller_id INTEGER REFERENCES resellers(id),
-        reseller_code VARCHAR(20), product VARCHAR(100),
-        customer_email VARCHAR(200), transaction_id VARCHAR(100),
-        amount DECIMAL(10,2), status VARCHAR(20) DEFAULT 'pending',
-        reject_reason TEXT, due_reminder_count INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT NOW())""")
-    conn.run("""CREATE TABLE IF NOT EXISTS bot_memory (
-        id SERIAL PRIMARY KEY, key VARCHAR(200) UNIQUE,
-        value TEXT, created_at TIMESTAMP DEFAULT NOW(),
-        updated_at TIMESTAMP DEFAULT NOW())""")
-    conn.close()
+    try:
+        conn.run("""CREATE TABLE IF NOT EXISTS orders (
+            id SERIAL PRIMARY KEY, woo_order_id VARCHAR(50),
+            customer_name VARCHAR(200), customer_email VARCHAR(200),
+            total DECIMAL(10,2), status VARCHAR(50), items TEXT,
+            created_at TIMESTAMP DEFAULT NOW())""")
+        conn.run("""CREATE TABLE IF NOT EXISTS income (
+            id SERIAL PRIMARY KEY, amount DECIMAL(10,2), note TEXT,
+            type VARCHAR(20) DEFAULT 'manual', created_at TIMESTAMP DEFAULT NOW())""")
+        conn.run("""CREATE TABLE IF NOT EXISTS resellers (
+            id SERIAL PRIMARY KEY, name VARCHAR(200), phone VARCHAR(50),
+            reseller_code VARCHAR(20), telegram_chat_id VARCHAR(50),
+            created_at TIMESTAMP DEFAULT NOW())""")
+        conn.run("""CREATE TABLE IF NOT EXISTS reseller_orders (
+            id SERIAL PRIMARY KEY, reseller_id INTEGER REFERENCES resellers(id),
+            product TEXT, quantity INTEGER, price DECIMAL(10,2),
+            created_at TIMESTAMP DEFAULT NOW())""")
+        conn.run("""CREATE TABLE IF NOT EXISTS reseller_bot_orders (
+            id SERIAL PRIMARY KEY, reseller_id INTEGER REFERENCES resellers(id),
+            reseller_code VARCHAR(20), product VARCHAR(100),
+            customer_email VARCHAR(200), transaction_id VARCHAR(100),
+            amount DECIMAL(10,2), status VARCHAR(20) DEFAULT 'pending',
+            reject_reason TEXT, due_reminder_count INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT NOW())""")
+        conn.run("""CREATE TABLE IF NOT EXISTS bot_memory (
+            id SERIAL PRIMARY KEY, key VARCHAR(200) UNIQUE,
+            value TEXT, created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW())""")
+    finally:
+        conn.close()
     logger.info("Database setup complete!")
 
 # =================== MEMORY FUNCTIONS ===================
@@ -90,148 +94,283 @@ def setup_db():
 def memory_save(key, value):
     conn = get_db()
     try:
-        conn.run("INSERT INTO bot_memory (key, value, updated_at) VALUES (:k, :v, NOW()) ON CONFLICT (key) DO UPDATE SET value = :v, updated_at = NOW()", k=key, v=value)
-    except:
-        conn.run("UPDATE bot_memory SET value = :v, updated_at = NOW() WHERE key = :k", k=key, v=value)
-    conn.close()
+        conn.run(
+            "INSERT INTO bot_memory (key, value, updated_at) VALUES (:k, :v, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value = :v, updated_at = NOW()",
+            k=key, v=value
+        )
+    finally:
+        conn.close()
 
 def memory_get_all():
     conn = get_db()
-    rows = conn.run("SELECT key, value, updated_at FROM bot_memory ORDER BY updated_at DESC")
-    conn.close()
+    try:
+        rows = conn.run("SELECT key, value, updated_at FROM bot_memory ORDER BY updated_at DESC")
+    finally:
+        conn.close()
     return [{"key": r[0], "value": r[1], "updated_at": str(r[2])} for r in rows]
 
 def memory_get(key):
     conn = get_db()
-    rows = conn.run("SELECT value FROM bot_memory WHERE key = :k", k=key)
-    conn.close()
+    try:
+        rows = conn.run("SELECT value FROM bot_memory WHERE key = :k", k=key)
+    finally:
+        conn.close()
     return rows[0][0] if rows else None
 
 # =================== DB HELPERS ===================
 
 def db_get_recent_orders(limit=10, status=None):
     conn = get_db()
-    if status:
-        rows = conn.run("SELECT id, woo_order_id, customer_name, customer_email, total, status, items, created_at FROM orders WHERE status = :s ORDER BY created_at DESC LIMIT :l", s=status, l=limit)
-    else:
-        rows = conn.run("SELECT id, woo_order_id, customer_name, customer_email, total, status, items, created_at FROM orders ORDER BY created_at DESC LIMIT :l", l=limit)
-    conn.close()
-    return [{"id": r[0], "woo_order_id": r[1], "customer_name": r[2], "customer_email": r[3], "total": str(r[4]), "status": r[5], "items": r[6], "created_at": str(r[7])} for r in rows]
+    try:
+        if status:
+            rows = conn.run(
+                "SELECT id, woo_order_id, customer_name, customer_email, total, status, items, created_at "
+                "FROM orders WHERE status = :s ORDER BY created_at DESC LIMIT :l",
+                s=status, l=limit
+            )
+        else:
+            rows = conn.run(
+                "SELECT id, woo_order_id, customer_name, customer_email, total, status, items, created_at "
+                "FROM orders ORDER BY created_at DESC LIMIT :l",
+                l=limit
+            )
+    finally:
+        conn.close()
+    return [{"id": r[0], "woo_order_id": r[1], "customer_name": r[2], "customer_email": r[3],
+             "total": str(r[4]), "status": r[5], "items": r[6], "created_at": str(r[7])} for r in rows]
 
 def db_get_last_order():
     conn = get_db()
-    rows = conn.run("SELECT id, woo_order_id, customer_name, customer_email, total, status, items, created_at FROM orders ORDER BY created_at DESC LIMIT 1")
-    conn.close()
+    try:
+        rows = conn.run(
+            "SELECT id, woo_order_id, customer_name, customer_email, total, status, items, created_at "
+            "FROM orders ORDER BY created_at DESC LIMIT 1"
+        )
+    finally:
+        conn.close()
     if rows:
         r = rows[0]
-        return {"id": r[0], "woo_order_id": r[1], "customer_name": r[2], "customer_email": r[3], "total": str(r[4]), "status": r[5], "items": r[6], "created_at": str(r[7])}
+        return {"id": r[0], "woo_order_id": r[1], "customer_name": r[2], "customer_email": r[3],
+                "total": str(r[4]), "status": r[5], "items": r[6], "created_at": str(r[7])}
     return None
 
 def db_update_order_status(order_id, new_status, use_woo_id=False):
     conn = get_db()
-    if use_woo_id:
-        rows = conn.run("SELECT id, woo_order_id FROM orders WHERE woo_order_id = :oid", oid=str(order_id))
-    else:
-        rows = conn.run("SELECT id, woo_order_id FROM orders WHERE id = :id", id=int(order_id))
-    if not rows:
-        conn.close()
-        return False, "Order paoa jaini"
-    db_id, woo_id = rows[0][0], rows[0][1]
-    conn.run("UPDATE orders SET status = :s WHERE id = :id", s=new_status, id=db_id)
-    conn.close()
     try:
-        req.put(f"https://favouritedeals.online/wp-json/wc/v3/orders/{woo_id}", json={"status": new_status}, auth=(WC_KEY, WC_SECRET), timeout=10)
+        if use_woo_id:
+            rows = conn.run("SELECT id, woo_order_id FROM orders WHERE woo_order_id = :oid", oid=str(order_id))
+        else:
+            rows = conn.run("SELECT id, woo_order_id FROM orders WHERE id = :id", id=int(order_id))
+        if not rows:
+            return False, "Order paoa jaini"
+        db_id, woo_id = rows[0][0], rows[0][1]
+        conn.run("UPDATE orders SET status = :s WHERE id = :id", s=new_status, id=db_id)
+    finally:
+        conn.close()
+    try:
+        req.put(
+            f"https://favouritedeals.online/wp-json/wc/v3/orders/{woo_id}",
+            json={"status": new_status}, auth=(WC_KEY, WC_SECRET), timeout=10
+        )
     except Exception as e:
         logger.error(f"WC update error: {e}")
     return True, woo_id
 
 def db_get_income_summary(days=1):
     conn = get_db()
-    since = datetime.now() - timedelta(days=days)
-    rows = conn.run("SELECT SUM(amount), COUNT(*) FROM income WHERE created_at >= :s", s=since)
-    conn.close()
+    try:
+        since = datetime.now() - timedelta(days=days)
+        rows = conn.run("SELECT SUM(amount), COUNT(*) FROM income WHERE created_at >= :s", s=since)
+    finally:
+        conn.close()
     return {"total": str(rows[0][0] or 0), "count": rows[0][1] or 0}
 
 def db_get_orders_summary(days=1):
     conn = get_db()
-    since = datetime.now() - timedelta(days=days)
-    rows = conn.run("SELECT COUNT(*), SUM(total) FROM orders WHERE created_at >= :s", s=since)
-    conn.close()
+    try:
+        since = datetime.now() - timedelta(days=days)
+        rows = conn.run("SELECT COUNT(*), SUM(total) FROM orders WHERE created_at >= :s", s=since)
+    finally:
+        conn.close()
     return {"count": rows[0][0] or 0, "total": str(rows[0][1] or 0)}
 
 def db_search_orders_by_name(name):
     conn = get_db()
-    rows = conn.run("SELECT id, woo_order_id, customer_name, customer_email, total, status, created_at FROM orders WHERE LOWER(customer_name) LIKE :n ORDER BY created_at DESC LIMIT 5", n=f"%{name.lower()}%")
-    conn.close()
-    return [{"id": r[0], "woo_order_id": r[1], "customer_name": r[2], "customer_email": r[3], "total": str(r[4]), "status": r[5], "created_at": str(r[6])} for r in rows]
+    try:
+        rows = conn.run(
+            "SELECT id, woo_order_id, customer_name, customer_email, total, status, created_at "
+            "FROM orders WHERE LOWER(customer_name) LIKE :n ORDER BY created_at DESC LIMIT 5",
+            n=f"%{name.lower()}%"
+        )
+    finally:
+        conn.close()
+    return [{"id": r[0], "woo_order_id": r[1], "customer_name": r[2], "customer_email": r[3],
+             "total": str(r[4]), "status": r[5], "created_at": str(r[6])} for r in rows]
 
 def db_add_income(amount, note):
     conn = get_db()
-    conn.run("INSERT INTO income (amount, note, type) VALUES (:a, :n, 'manual')", a=float(amount), n=note)
-    conn.close()
+    try:
+        conn.run("INSERT INTO income (amount, note, type) VALUES (:a, :n, 'manual')", a=float(amount), n=note)
+    finally:
+        conn.close()
     return True
 
 def db_get_reseller_summary(reseller_name=None):
+    """
+    ✅ FIX: reseller_bot_orders থেকেও data নেওয়া হচ্ছে এখন।
+    reseller_orders (manual) + reseller_bot_orders (bot) দুটোই count হবে।
+    """
     conn = get_db()
-    if reseller_name:
-        rows = conn.run("""SELECT r.name, r.phone, r.reseller_code, COUNT(ro.id), COALESCE(SUM(ro.price * ro.quantity), 0)
-            FROM resellers r LEFT JOIN reseller_orders ro ON r.id = ro.reseller_id AND ro.created_at >= date_trunc('month', NOW())
-            WHERE LOWER(r.name) LIKE :n OR LOWER(r.reseller_code) LIKE :n GROUP BY r.id, r.name, r.phone, r.reseller_code""", n=f"%{reseller_name.lower()}%")
-    else:
-        rows = conn.run("""SELECT r.name, r.phone, r.reseller_code, COUNT(ro.id), COALESCE(SUM(ro.price * ro.quantity), 0)
-            FROM resellers r LEFT JOIN reseller_orders ro ON r.id = ro.reseller_id AND ro.created_at >= date_trunc('month', NOW())
-            GROUP BY r.id, r.name, r.phone, r.reseller_code""")
-    conn.close()
-    return [{"name": r[0], "phone": r[1], "code": r[2], "orders": r[3], "total": str(r[4])} for r in rows]
+    try:
+        if reseller_name:
+            # ✅ FIX: UPPER() দিয়ে case-insensitive search
+            rows = conn.run("""
+                SELECT r.name, r.phone, r.reseller_code,
+                    COUNT(DISTINCT ro.id) AS manual_orders,
+                    COALESCE(SUM(ro.price * ro.quantity), 0) AS manual_total,
+                    COUNT(DISTINCT rbo.id) AS bot_orders,
+                    COALESCE(SUM(rbo.amount), 0) AS bot_total
+                FROM resellers r
+                LEFT JOIN reseller_orders ro ON r.id = ro.reseller_id
+                    AND ro.created_at >= date_trunc('month', NOW())
+                LEFT JOIN reseller_bot_orders rbo ON r.id = rbo.reseller_id
+                    AND rbo.created_at >= date_trunc('month', NOW())
+                    AND rbo.status != 'rejected'
+                WHERE UPPER(r.name) LIKE UPPER(:n) OR UPPER(r.reseller_code) LIKE UPPER(:n)
+                GROUP BY r.id, r.name, r.phone, r.reseller_code
+            """, n=f"%{reseller_name}%")
+        else:
+            rows = conn.run("""
+                SELECT r.name, r.phone, r.reseller_code,
+                    COUNT(DISTINCT ro.id) AS manual_orders,
+                    COALESCE(SUM(ro.price * ro.quantity), 0) AS manual_total,
+                    COUNT(DISTINCT rbo.id) AS bot_orders,
+                    COALESCE(SUM(rbo.amount), 0) AS bot_total
+                FROM resellers r
+                LEFT JOIN reseller_orders ro ON r.id = ro.reseller_id
+                    AND ro.created_at >= date_trunc('month', NOW())
+                LEFT JOIN reseller_bot_orders rbo ON r.id = rbo.reseller_id
+                    AND rbo.created_at >= date_trunc('month', NOW())
+                    AND rbo.status != 'rejected'
+                GROUP BY r.id, r.name, r.phone, r.reseller_code
+            """)
+    finally:
+        conn.close()
+
+    result = []
+    for r in rows:
+        total_orders = (r[3] or 0) + (r[5] or 0)
+        total_amount = float(r[4] or 0) + float(r[6] or 0)
+        result.append({
+            "name": r[0], "phone": r[1], "code": r[2],
+            "orders": total_orders, "total": str(total_amount),
+            "manual_orders": r[3] or 0, "bot_orders": r[5] or 0
+        })
+    return result
+
+def db_get_today_reseller_bot_orders():
+    """✅ NEW: আজকের reseller bot orders আলাদা করে দেখানোর জন্য"""
+    conn = get_db()
+    try:
+        since = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        rows = conn.run("""
+            SELECT rbo.id, r.name, rbo.reseller_code, rbo.product,
+                   rbo.customer_email, rbo.amount, rbo.status, rbo.transaction_id, rbo.created_at
+            FROM reseller_bot_orders rbo
+            LEFT JOIN resellers r ON r.id = rbo.reseller_id
+            WHERE rbo.created_at >= :s
+            ORDER BY rbo.created_at DESC
+        """, s=since)
+    finally:
+        conn.close()
+    return [{"id": r[0], "reseller_name": r[1], "reseller_code": r[2], "product": r[3],
+             "email": r[4], "amount": str(r[5]), "status": r[6],
+             "txn": r[7], "created_at": str(r[8])} for r in rows]
 
 def get_reseller_bot_order(order_id):
     conn = get_db()
-    rows = conn.run("SELECT id, reseller_code, product, customer_email, amount, status, transaction_id FROM reseller_bot_orders WHERE id = :id", id=order_id)
-    conn.close()
+    try:
+        rows = conn.run(
+            "SELECT id, reseller_code, product, customer_email, amount, status, transaction_id "
+            "FROM reseller_bot_orders WHERE id = :id",
+            id=order_id
+        )
+    finally:
+        conn.close()
     if rows:
-        return {"id": rows[0][0], "reseller_code": rows[0][1], "product": rows[0][2], "customer_email": rows[0][3], "amount": str(rows[0][4]), "status": rows[0][5], "transaction_id": rows[0][6]}
+        return {"id": rows[0][0], "reseller_code": rows[0][1], "product": rows[0][2],
+                "customer_email": rows[0][3], "amount": str(rows[0][4]),
+                "status": rows[0][5], "transaction_id": rows[0][6]}
     return None
 
 def update_reseller_bot_order(order_id, status, reject_reason=None):
     conn = get_db()
-    if reject_reason:
-        conn.run("UPDATE reseller_bot_orders SET status = :s, reject_reason = :r WHERE id = :id", s=status, r=reject_reason, id=order_id)
-    else:
-        conn.run("UPDATE reseller_bot_orders SET status = :s WHERE id = :id", s=status, id=order_id)
-    conn.close()
+    try:
+        if reject_reason:
+            conn.run(
+                "UPDATE reseller_bot_orders SET status = :s, reject_reason = :r WHERE id = :id",
+                s=status, r=reject_reason, id=order_id
+            )
+        else:
+            conn.run("UPDATE reseller_bot_orders SET status = :s WHERE id = :id", s=status, id=order_id)
+    finally:
+        conn.close()
 
 def get_reseller_by_chat_id(chat_id):
     conn = get_db()
-    rows = conn.run("SELECT id, name, phone, reseller_code FROM resellers WHERE telegram_chat_id = :c", c=str(chat_id))
-    conn.close()
+    try:
+        rows = conn.run(
+            "SELECT id, name, phone, reseller_code FROM resellers WHERE telegram_chat_id = :c",
+            c=str(chat_id)
+        )
+    finally:
+        conn.close()
     if rows:
         return {"id": rows[0][0], "name": rows[0][1], "phone": rows[0][2], "code": rows[0][3]}
     return None
 
 def get_reseller_by_code(code):
     conn = get_db()
-    rows = conn.run("SELECT id, name, phone FROM resellers WHERE reseller_code = :c", c=code.upper())
-    conn.close()
+    try:
+        # ✅ FIX: UPPER() দিয়ে case-insensitive match
+        rows = conn.run(
+            "SELECT id, name, phone FROM resellers WHERE UPPER(reseller_code) = UPPER(:c)",
+            c=code
+        )
+    finally:
+        conn.close()
     if rows:
         return {"id": rows[0][0], "name": rows[0][1], "phone": rows[0][2]}
     return None
 
 def get_pending_due_orders():
     conn = get_db()
-    rows = conn.run("""SELECT id, reseller_code, product, customer_email, amount, due_reminder_count, created_at
-        FROM reseller_bot_orders WHERE transaction_id = 'PORE_DIBO' AND status = 'pending'""")
-    conn.close()
-    return [{"id": r[0], "reseller_code": r[1], "product": r[2], "customer_email": r[3], "amount": str(r[4]), "reminder_count": r[5], "created_at": str(r[6])} for r in rows]
+    try:
+        rows = conn.run("""
+            SELECT id, reseller_code, product, customer_email, amount, due_reminder_count, created_at
+            FROM reseller_bot_orders
+            WHERE transaction_id = 'PORE_DIBO' AND status = 'pending'
+        """)
+    finally:
+        conn.close()
+    return [{"id": r[0], "reseller_code": r[1], "product": r[2], "customer_email": r[3],
+             "amount": str(r[4]), "reminder_count": r[5], "created_at": str(r[6])} for r in rows]
 
-async def notify_reseller(reseller_code, message):
+async def notify_reseller(reseller_code, message, parse_mode="Markdown"):
     try:
         conn = get_db()
-        rows = conn.run("SELECT telegram_chat_id FROM resellers WHERE reseller_code = :c", c=reseller_code)
-        conn.close()
+        try:
+            rows = conn.run(
+                "SELECT telegram_chat_id FROM resellers WHERE UPPER(reseller_code) = UPPER(:c)",
+                c=reseller_code
+            )
+        finally:
+            conn.close()
         if rows and rows[0][0]:
             from telegram import Bot
             reseller_bot = Bot(token=RESELLER_BOT_TOKEN)
-            await reseller_bot.send_message(chat_id=rows[0][0], text=message)
+            await reseller_bot.send_message(chat_id=rows[0][0], text=message, parse_mode=parse_mode)
     except Exception as e:
         logger.error(f"Reseller notify error: {e}")
 
@@ -242,8 +381,13 @@ async def send_due_reminders():
             due_orders = get_pending_due_orders()
             for order in due_orders:
                 conn = get_db()
-                conn.run("UPDATE reseller_bot_orders SET due_reminder_count = due_reminder_count + 1 WHERE id = :id", id=order['id'])
-                conn.close()
+                try:
+                    conn.run(
+                        "UPDATE reseller_bot_orders SET due_reminder_count = due_reminder_count + 1 WHERE id = :id",
+                        id=order['id']
+                    )
+                finally:
+                    conn.close()
 
                 reseller_msg = (
                     f"⚠️ *Payment Reminder #{order['reminder_count'] + 1}*\n\n"
@@ -260,7 +404,14 @@ async def send_due_reminders():
                 admin_bot = Bot(token=BOT_TOKEN)
                 await admin_bot.send_message(
                     chat_id=CHAT_ID,
-                    text=f"⚠️ *Due Reminder Sent!*\n\nReseller: {order['reseller_code']}\nOrder #{order['id']}\nProduct: {order['product']}\nAmount: ৳{order['amount']}\nReminder #{order['reminder_count'] + 1}",
+                    text=(
+                        f"⚠️ *Due Reminder Sent!*\n\n"
+                        f"Reseller: {order['reseller_code']}\n"
+                        f"Order #{order['id']}\n"
+                        f"Product: {order['product']}\n"
+                        f"Amount: ৳{order['amount']}\n"
+                        f"Reminder #{order['reminder_count'] + 1}"
+                    ),
                     parse_mode="Markdown"
                 )
         except Exception as e:
@@ -269,16 +420,82 @@ async def send_due_reminders():
 # =================== AI ===================
 
 AI_FUNCTIONS = [
-    {"name": "get_recent_orders", "description": "Recent orders dekhao", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}, "status": {"type": "string"}}}},
-    {"name": "get_last_order", "description": "Sorboshesh order", "parameters": {"type": "object", "properties": {}}},
-    {"name": "update_order_status", "description": "Order status change koro", "parameters": {"type": "object", "properties": {"order_id": {"type": "string"}, "new_status": {"type": "string"}, "use_woo_id": {"type": "boolean"}}, "required": ["order_id", "new_status"]}},
-    {"name": "get_income_summary", "description": "Income summary", "parameters": {"type": "object", "properties": {"days": {"type": "integer"}}}},
-    {"name": "get_orders_summary", "description": "Orders count", "parameters": {"type": "object", "properties": {"days": {"type": "integer"}}}},
-    {"name": "search_orders_by_name", "description": "Naam diye order khojo", "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
-    {"name": "add_income", "description": "Manual income add koro", "parameters": {"type": "object", "properties": {"amount": {"type": "number"}, "note": {"type": "string"}}, "required": ["amount", "note"]}},
-    {"name": "get_reseller_summary", "description": "Reseller summary. Code ba naam diye filter.", "parameters": {"type": "object", "properties": {"reseller_name": {"type": "string"}}}},
-    {"name": "save_memory", "description": "Kono important info, reminder, ba note save koro", "parameters": {"type": "object", "properties": {"key": {"type": "string", "description": "Short identifier"}, "value": {"type": "string", "description": "Info to save"}}, "required": ["key", "value"]}},
-    {"name": "get_all_memories", "description": "Sob saved notes/reminders/info dekhao", "parameters": {"type": "object", "properties": {}}},
+    {
+        "name": "get_recent_orders",
+        "description": "Recent WooCommerce orders dekhao",
+        "parameters": {"type": "object", "properties": {
+            "limit": {"type": "integer"},
+            "status": {"type": "string"}
+        }}
+    },
+    {
+        "name": "get_last_order",
+        "description": "Sorboshesh WooCommerce order",
+        "parameters": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "update_order_status",
+        "description": "Order status change koro",
+        "parameters": {"type": "object", "properties": {
+            "order_id": {"type": "string"},
+            "new_status": {"type": "string"},
+            "use_woo_id": {"type": "boolean"}
+        }, "required": ["order_id", "new_status"]}
+    },
+    {
+        "name": "get_income_summary",
+        "description": "Income summary",
+        "parameters": {"type": "object", "properties": {"days": {"type": "integer"}}}
+    },
+    {
+        "name": "get_orders_summary",
+        "description": "Orders count summary",
+        "parameters": {"type": "object", "properties": {"days": {"type": "integer"}}}
+    },
+    {
+        "name": "search_orders_by_name",
+        "description": "Customer naam diye order khojo",
+        "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+    },
+    {
+        "name": "add_income",
+        "description": "Manual income add koro",
+        "parameters": {"type": "object", "properties": {
+            "amount": {"type": "number"},
+            "note": {"type": "string"}
+        }, "required": ["amount", "note"]}
+    },
+    {
+        "name": "get_reseller_summary",
+        "description": (
+            "Reseller er summary dekhao — manual orders + bot orders duita milie. "
+            "Code ba naam diye filter korte paro. Example: 'rs001', 'Tanjim', etc."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "reseller_name": {"type": "string", "description": "Reseller code ba naam (partial match hobe)"}
+        }}
+    },
+    {
+        "name": "get_today_reseller_bot_orders",
+        "description": (
+            "Aajker reseller bot orders dekhao — kon reseller order korlo, ki product, status ki. "
+            "Jodi 'aaj kono order ache kina' ba 'kon reseller order korche' jaiga jigges kore, ei function call koro."
+        ),
+        "parameters": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "save_memory",
+        "description": "Kono important info, reminder, ba note save koro",
+        "parameters": {"type": "object", "properties": {
+            "key": {"type": "string", "description": "Short identifier"},
+            "value": {"type": "string", "description": "Info to save"}
+        }, "required": ["key", "value"]}
+    },
+    {
+        "name": "get_all_memories",
+        "description": "Sob saved notes/reminders/info dekhao",
+        "parameters": {"type": "object", "properties": {}}
+    },
 ]
 
 def execute_function(name, args):
@@ -302,6 +519,9 @@ def execute_function(name, args):
             return {"success": db_add_income(args["amount"], args["note"])}
         elif name == "get_reseller_summary":
             return db_get_reseller_summary(args.get("reseller_name"))
+        elif name == "get_today_reseller_bot_orders":
+            # ✅ NEW function
+            return db_get_today_reseller_bot_orders()
         elif name == "save_memory":
             memory_save(args["key"], args["value"])
             return {"success": True, "saved": args["key"]}
@@ -322,7 +542,7 @@ def build_system_prompt():
 
 Tumi Banglish e kotha bolbe - mane Bangla meaning kintu English haroof. Jemon:
 "Bhai, last order ta complete hoye geche."
-"Haan, income add korলাম. 500 taka jog hoye geche."
+"Haan, income add korlam. 500 taka jog hoye geche."
 
 Rules:
 - Chhoto chhoto sentence. Casual, friendly tone.
@@ -332,6 +552,11 @@ Rules:
 - Jodi kono important info dey, save_memory function use kore save kore nao.
 - Sob memory/notes mone rekhe respond koro.
 - Jodi kono reminder er somoy hoye jay, mention koro.
+
+IMPORTANT — Reseller orders:
+- "Kon reseller aaj order korche", "aaj kono order ache kina" — EI KHETRE OBOSSOI get_today_reseller_bot_orders call koro.
+- Reseller er code search korte UPPER/LOWER case theke bhabte hobe na, DB tei fix ache.
+- get_reseller_summary te DUITAI data thakbe: manual orders + bot orders.
 {memory_text}"""
 
 async def process_ai_message(messages_history):
@@ -342,7 +567,13 @@ async def process_ai_message(messages_history):
         response = req.post(
             "https://api.openai.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
-            json={"model": "gpt-3.5-turbo", "messages": messages, "functions": AI_FUNCTIONS, "function_call": "auto", "max_tokens": 1000},
+            json={
+                "model": "gpt-4o-mini",   # ✅ FIX: gpt-3.5-turbo থেকে upgrade — সস্তা + ভালো
+                "messages": messages,
+                "functions": AI_FUNCTIONS,
+                "function_call": "auto",
+                "max_tokens": 1000
+            },
             timeout=15
         )
         resp = response.json()
@@ -359,7 +590,7 @@ async def process_ai_message(messages_history):
             response2 = req.post(
                 "https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
-                json={"model": "gpt-3.5-turbo", "messages": messages, "max_tokens": 500},
+                json={"model": "gpt-4o-mini", "messages": messages, "max_tokens": 500},
                 timeout=15
             )
             resp2 = response2.json()
@@ -383,7 +614,8 @@ def main_menu_keyboard():
         [InlineKeyboardButton("👥 Reseller", callback_data="resellers"),
          InlineKeyboardButton("➕ Manual Income", callback_data="manual_income")],
         [InlineKeyboardButton("🔍 Customer Khojo", callback_data="search_customer"),
-         InlineKeyboardButton("⏳ Pending Orders", callback_data="pending_orders")]
+         InlineKeyboardButton("⏳ Pending Orders", callback_data="pending_orders")],
+        [InlineKeyboardButton("🛍️ Reseller Bot Orders", callback_data="reseller_bot_orders_today")]
     ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -399,16 +631,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     await update.message.chat.send_action("typing")
 
-    # Handle txn update from reseller
+    # Handle txn update from reseller (main bot side)
     if text.startswith("/txn_"):
         parts = text.split("_")
         if len(parts) >= 3:
-            order_id = int(parts[1])
-            txn_id = parts[2]
-            conn = get_db()
-            conn.run("UPDATE reseller_bot_orders SET transaction_id = :t WHERE id = :id", t=txn_id, id=order_id)
-            conn.close()
-            await update.message.reply_text(f"✅ Order #{order_id} er transaction ID update hoye geche: {txn_id}")
+            try:
+                order_id = int(parts[1])
+                txn_id = "_".join(parts[2:])   # ✅ FIX: সব parts join
+                conn = get_db()
+                try:
+                    conn.run("UPDATE reseller_bot_orders SET transaction_id = :t WHERE id = :id", t=txn_id, id=order_id)
+                finally:
+                    conn.close()
+                await update.message.reply_text(f"✅ Order #{order_id} er transaction ID update hoye geche: {txn_id}")
+            except:
+                await update.message.reply_text("❌ Format thik na. Example: /txn_1_TXN123456")
         return
 
     # Handle reject reason
@@ -417,9 +654,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order = get_reseller_bot_order(order_id)
         if order:
             update_reseller_bot_order(order_id, "rejected", text)
-            await notify_reseller(order['reseller_code'],
-                f"❌ Tomar order #{order_id} reject hoye geche bhai.\nKaron: {text}\n\nAdmin er sathe jogajog koro.")
-            await update.message.reply_text(f"❌ Order #{order_id} rejected! Reseller ke notify kora hoye geche.", reply_markup=main_menu_keyboard())
+            await notify_reseller(
+                order['reseller_code'],
+                f"❌ Tomar order #{order_id} reject hoye geche bhai.\nKaron: {text}\n\nAdmin er sathe jogajog koro."
+            )
+            await update.message.reply_text(
+                f"❌ Order #{order_id} rejected! Reseller ke notify kora hoye geche.",
+                reply_markup=main_menu_keyboard()
+            )
         context.user_data['state'] = None
         return
 
@@ -432,7 +674,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ai_reply = await process_ai_message(user_conversations[chat_id])
     if ai_reply:
         user_conversations[chat_id].append({"role": "assistant", "content": ai_reply})
-        await update.message.reply_text(ai_reply, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
+        await update.message.reply_text(
+            ai_reply,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
+            parse_mode="Markdown"
+        )
     else:
         await update.message.reply_text("Menu theke kaj koro bhai:", reply_markup=main_menu_keyboard())
 
@@ -446,14 +692,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order = get_reseller_bot_order(order_id)
         if order:
             update_reseller_bot_order(order_id, "approved")
-            await notify_reseller(order['reseller_code'],
+            # Income এ যোগ করা
+            conn = get_db()
+            try:
+                conn.run(
+                    "INSERT INTO income (amount, note, type) VALUES (:a, :n, 'reseller')",
+                    a=float(order['amount']),
+                    n=f"Reseller Order #{order_id} — {order['product']} ({order['reseller_code']})"
+                )
+            finally:
+                conn.close()
+            await notify_reseller(
+                order['reseller_code'],
                 f"✅ *Order #{order_id} Approved!*\n\n"
                 f"📦 Product: {order['product']}\n"
                 f"📧 Email: {order['customer_email']}\n"
                 f"💵 Amount: ৳{order['amount']}\n\n"
-                f"24 ghontar moddhe account deliver kora hobe. Dhonnobad! 🙏")
-            await query.edit_message_text(f"✅ Order #{order_id} approved! Reseller ke notify kora hoye geche.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
+                f"24 ghontar moddhe account deliver kora hobe. Dhonnobad! 🙏"
+            )
+            await query.edit_message_text(
+                f"✅ Order #{order_id} approved! Reseller ke notify kora hoye geche.\n"
+                f"💰 ৳{order['amount']} income e add hoye geche.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
+                parse_mode="Markdown"
+            )
         return
 
     elif data.startswith("rreject_"):
@@ -475,13 +737,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_resellers(query)
     elif data == "pending_orders":
         await show_orders_by_status(query, "pending")
+    elif data == "reseller_bot_orders_today":
+        await show_reseller_bot_orders_today(query)
     elif data == "manual_income":
         await query.edit_message_text("💰 `/income 500 bkash e paisi`", parse_mode="Markdown")
     elif data == "search_customer":
         await query.edit_message_text("🔍 `/customer example@email.com`", parse_mode="Markdown")
     elif data == "menu":
-        await query.edit_message_text("🛍️ *FD Assistant*\n\nMenu theke kaj koro ba seedha bolo:",
-            reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+        await query.edit_message_text(
+            "🛍️ *FD Assistant*\n\nMenu theke kaj koro ba seedha bolo:",
+            reply_markup=main_menu_keyboard(), parse_mode="Markdown"
+        )
     elif data.startswith("status_"):
         await show_status_options(query, data.split("_")[1])
     elif data.startswith("setstatus_"):
@@ -491,10 +757,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_orders(query, days=1):
     since = datetime.now() - timedelta(days=days)
     conn = get_db()
-    rows = conn.run("SELECT id, woo_order_id, customer_name, total, status FROM orders WHERE created_at >= :s ORDER BY created_at DESC", s=since)
-    conn.close()
+    try:
+        rows = conn.run(
+            "SELECT id, woo_order_id, customer_name, total, status FROM orders WHERE created_at >= :s ORDER BY created_at DESC",
+            s=since
+        )
+    finally:
+        conn.close()
     if not rows:
-        await query.edit_message_text(f"📦 Kono order nei bhai.",
+        await query.edit_message_text(
+            f"📦 Kono order nei bhai.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
         return
     text = f"📦 *Last {days} diner order ({len(rows)}ta):*\n\n"
@@ -507,10 +779,16 @@ async def show_orders(query, days=1):
 
 async def show_orders_by_status(query, status):
     conn = get_db()
-    rows = conn.run("SELECT id, woo_order_id, customer_name, total, status FROM orders WHERE status = :s ORDER BY created_at DESC LIMIT 10", s=status)
-    conn.close()
+    try:
+        rows = conn.run(
+            "SELECT id, woo_order_id, customer_name, total, status FROM orders WHERE status = :s ORDER BY created_at DESC LIMIT 10",
+            s=status
+        )
+    finally:
+        conn.close()
     if not rows:
-        await query.edit_message_text(f"📦 {status} status e kono order nei.",
+        await query.edit_message_text(
+            f"📦 {status} status e kono order nei.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
         return
     text = f"📦 *{status} orders ({len(rows)}ta):*\n\n"
@@ -524,37 +802,111 @@ async def show_orders_by_status(query, status):
 async def show_income(query, days=1):
     since = datetime.now() - timedelta(days=days)
     conn = get_db()
-    rows = conn.run("SELECT SUM(amount), COUNT(*) FROM income WHERE created_at >= :s", s=since)
-    conn.close()
+    try:
+        rows = conn.run("SELECT SUM(amount), COUNT(*) FROM income WHERE created_at >= :s", s=since)
+    finally:
+        conn.close()
     total = rows[0][0] or 0
     count = rows[0][1] or 0
     label = "Aajker" if days == 1 else f"Last {days} diner"
-    await query.edit_message_text(f"💰 *{label} Income*\n\nMot: ৳{total}\nEntry: {count}ta",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]), parse_mode="Markdown")
+    await query.edit_message_text(
+        f"💰 *{label} Income*\n\nMot: ৳{total}\nEntry: {count}ta",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]),
+        parse_mode="Markdown"
+    )
 
 async def show_month_report(query):
     since = datetime.now() - timedelta(days=30)
     conn = get_db()
-    o = conn.run("SELECT COUNT(*), SUM(total) FROM orders WHERE created_at >= :s", s=since)
-    i = conn.run("SELECT SUM(amount) FROM income WHERE created_at >= :s", s=since)
-    conn.close()
-    text = f"📊 *Last 30 diner Report*\n\n📦 Total Order: {o[0][0] or 0}ta\n💵 Revenue: ৳{o[0][1] or 0}\n💰 Manual Income: ৳{i[0][0] or 0}"
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]), parse_mode="Markdown")
+    try:
+        o = conn.run("SELECT COUNT(*), SUM(total) FROM orders WHERE created_at >= :s", s=since)
+        i = conn.run("SELECT SUM(amount) FROM income WHERE created_at >= :s", s=since)
+        rb = conn.run(
+            "SELECT COUNT(*), SUM(amount) FROM reseller_bot_orders WHERE created_at >= :s AND status = 'approved'",
+            s=since
+        )
+    finally:
+        conn.close()
+    text = (
+        f"📊 *Last 30 diner Report*\n\n"
+        f"📦 WooCommerce Order: {o[0][0] or 0}ta\n"
+        f"💵 WooCommerce Revenue: ৳{o[0][1] or 0}\n\n"
+        f"🛍️ Reseller Bot Orders (Approved): {rb[0][0] or 0}ta\n"
+        f"💵 Reseller Revenue: ৳{rb[0][1] or 0}\n\n"
+        f"💰 Total Income (Manual+Auto): ৳{i[0][0] or 0}"
+    )
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]),
+        parse_mode="Markdown"
+    )
 
 async def show_resellers(query):
     conn = get_db()
-    rows = conn.run("""SELECT r.name, r.phone, r.reseller_code, COUNT(ro.id), COALESCE(SUM(ro.price * ro.quantity), 0)
-        FROM resellers r LEFT JOIN reseller_orders ro ON r.id = ro.reseller_id AND ro.created_at >= date_trunc('month', NOW())
-        GROUP BY r.id, r.name, r.phone, r.reseller_code""")
-    conn.close()
+    try:
+        rows = conn.run("""
+            SELECT r.name, r.phone, r.reseller_code,
+                COUNT(DISTINCT ro.id),
+                COALESCE(SUM(ro.price * ro.quantity), 0),
+                COUNT(DISTINCT rbo.id),
+                COALESCE(SUM(rbo.amount), 0)
+            FROM resellers r
+            LEFT JOIN reseller_orders ro ON r.id = ro.reseller_id
+                AND ro.created_at >= date_trunc('month', NOW())
+            LEFT JOIN reseller_bot_orders rbo ON r.id = rbo.reseller_id
+                AND rbo.created_at >= date_trunc('month', NOW())
+                AND rbo.status != 'rejected'
+            GROUP BY r.id, r.name, r.phone, r.reseller_code
+        """)
+    finally:
+        conn.close()
     if not rows:
-        await query.edit_message_text("👥 Kono reseller nei.\n\nAdd: `/addreseller naam phone CODE`",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]), parse_mode="Markdown")
+        await query.edit_message_text(
+            "👥 Kono reseller nei.\n\nAdd: `/addreseller naam phone CODE`",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]),
+            parse_mode="Markdown"
+        )
         return
     text = "👥 *Ei Maser Reseller Report:*\n\n"
     for r in rows:
-        text += f"🔸 {r[0]} ({r[1]}) — `{r[2] or 'N/A'}`\n   Order: {r[3]}ta | ৳{r[4]}\n\n"
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]), parse_mode="Markdown")
+        total_orders = (r[3] or 0) + (r[5] or 0)
+        total_amount = float(r[4] or 0) + float(r[6] or 0)
+        text += (
+            f"🔸 *{r[0]}* ({r[1]}) — `{r[2] or 'N/A'}`\n"
+            f"   Manual: {r[3]}ta | Bot: {r[5]}ta | Mot: {total_orders}ta\n"
+            f"   💵 ৳{total_amount:.0f}\n\n"
+        )
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]),
+        parse_mode="Markdown"
+    )
+
+async def show_reseller_bot_orders_today(query):
+    """✅ NEW: আজকের reseller bot orders দেখানো"""
+    orders = db_get_today_reseller_bot_orders()
+    if not orders:
+        await query.edit_message_text(
+            "🛍️ Aaj ekhono kono reseller bot order nei.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
+        return
+    text = f"🛍️ *Aajker Reseller Bot Orders ({len(orders)}ta):*\n\n"
+    keyboard = []
+    for o in orders:
+        emoji = "✅" if o['status'] == "approved" else "❌" if o['status'] == "rejected" else "⏳"
+        due_tag = " ⚠️DUE" if o['txn'] == "PORE_DIBO" else ""
+        text += (
+            f"{emoji} #{o['id']} — *{o['reseller_name']}* (`{o['reseller_code']}`){due_tag}\n"
+            f"   📦 {o['product']} | 💵 ৳{o['amount']} | {o['status']}\n"
+            f"   📧 {o['email']}\n\n"
+        )
+        if o['status'] == 'pending':
+            keyboard.append([
+                InlineKeyboardButton(f"✅ Approve #{o['id']}", callback_data=f"rapprove_{o['id']}"),
+                InlineKeyboardButton(f"❌ Reject #{o['id']}", callback_data=f"rreject_{o['id']}")
+            ])
+    keyboard.append([InlineKeyboardButton("🔙 Menu", callback_data="menu")])
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def show_status_options(query, order_id):
     keyboard = [
@@ -569,10 +921,15 @@ async def show_status_options(query, order_id):
 async def update_order_status_btn(query, order_id, new_status):
     success, result = db_update_order_status(order_id, new_status)
     if success:
-        await query.edit_message_text(f"✅ Order #{result} — *{new_status}*!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]), parse_mode="Markdown")
+        await query.edit_message_text(
+            f"✅ Order #{result} — *{new_status}*!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]),
+            parse_mode="Markdown"
+        )
     else:
-        await query.edit_message_text(f"❌ {result}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
+        await query.edit_message_text(
+            f"❌ {result}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]))
 
 async def income_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 1:
@@ -592,8 +949,13 @@ async def customer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     email = context.args[0].lower()
     conn = get_db()
-    rows = conn.run("SELECT woo_order_id, customer_name, total, status, created_at FROM orders WHERE LOWER(customer_email) = :e ORDER BY created_at DESC", e=email)
-    conn.close()
+    try:
+        rows = conn.run(
+            "SELECT woo_order_id, customer_name, total, status, created_at FROM orders WHERE LOWER(customer_email) = :e ORDER BY created_at DESC",
+            e=email
+        )
+    finally:
+        conn.close()
     if not rows:
         await update.message.reply_text(f"❌ {email} email e kono order nei.")
         return
@@ -611,8 +973,10 @@ async def addreseller_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     name, phone, code = context.args[0], context.args[1], context.args[2].upper()
     conn = get_db()
-    conn.run("INSERT INTO resellers (name, phone, reseller_code) VALUES (:n, :p, :c)", n=name, p=phone, c=code)
-    conn.close()
+    try:
+        conn.run("INSERT INTO resellers (name, phone, reseller_code) VALUES (:n, :p, :c)", n=name, p=phone, c=code)
+    finally:
+        conn.close()
     await update.message.reply_text(f"✅ Reseller added!\n👤 {name} | 📞 {phone} | 🔑 {code}")
 
 async def resellersale_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -622,13 +986,17 @@ async def resellersale_command(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         phone, product, quantity, price = context.args[0], context.args[1], int(context.args[2]), float(context.args[3])
         conn = get_db()
-        reseller = conn.run("SELECT id, name FROM resellers WHERE phone = :p", p=phone)
-        if not reseller:
+        try:
+            reseller = conn.run("SELECT id, name FROM resellers WHERE phone = :p", p=phone)
+            if not reseller:
+                await update.message.reply_text(f"❌ {phone} number e reseller nei.")
+                return
+            conn.run(
+                "INSERT INTO reseller_orders (reseller_id, product, quantity, price) VALUES (:r, :p, :q, :pr)",
+                r=reseller[0][0], p=product, q=quantity, pr=price
+            )
+        finally:
             conn.close()
-            await update.message.reply_text(f"❌ {phone} number e reseller nei.")
-            return
-        conn.run("INSERT INTO reseller_orders (reseller_id, product, quantity, price) VALUES (:r, :p, :q, :pr)", r=reseller[0][0], p=product, q=quantity, pr=price)
-        conn.close()
         await update.message.reply_text(f"✅ {reseller[0][1]} — {product} x{quantity} = ৳{quantity*price}")
     except:
         await update.message.reply_text("❌ Vul format!")
@@ -639,19 +1007,37 @@ reseller_user_data = {}
 
 def reseller_main_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🛒 Notun Order", callback_data="res_new_order")],
-        [InlineKeyboardButton("📋 Amar Orders", callback_data="res_my_orders")]
+        [InlineKeyboardButton("🛒 Notun Order Dibo", callback_data="res_new_order")],
+        [InlineKeyboardButton("📋 Amar Orders Dekhbo", callback_data="res_my_orders")],
+        [InlineKeyboardButton("ℹ️ Price List", callback_data="res_price_list")]
     ])
 
 async def reseller_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     reseller = get_reseller_by_chat_id(chat_id)
     if reseller:
+        # Pending due order ache kina check
+        conn = get_db()
+        try:
+            due = conn.run(
+                "SELECT COUNT(*) FROM reseller_bot_orders WHERE reseller_code = :c AND transaction_id = 'PORE_DIBO' AND status = 'pending'",
+                c=reseller['code']
+            )
+        finally:
+            conn.close()
+        due_count = due[0][0] if due else 0
+        due_text = f"\n\n⚠️ Tomar *{due_count}ta due payment* baaki ache!" if due_count > 0 else ""
         await update.message.reply_text(
-            f"Welcome back *{reseller['name']}* bhai! 👋\nCode: `{reseller['code']}`",
+            f"🛍️ Welcome back *{reseller['name']}* bhai! 👋\n"
+            f"Tomar code: `{reseller['code']}`{due_text}\n\n"
+            f"Ki korte chao?",
             reply_markup=reseller_main_menu(), parse_mode="Markdown")
         return ConversationHandler.END
-    await update.message.reply_text("🛍️ *FD Reseller Bot*\n\nTomar unique reseller code dao:", parse_mode="Markdown")
+    await update.message.reply_text(
+        "🛍️ *FD Reseller Bot*\n\n"
+        "Assalamualaikum! 👋\n\n"
+        "Tomar unique *reseller code* ta dao — admin er kach theke pawa code:",
+        parse_mode="Markdown")
     return WAITING_CODE
 
 async def reseller_handle_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -659,12 +1045,21 @@ async def reseller_handle_code(update: Update, context: ContextTypes.DEFAULT_TYP
     chat_id = update.message.chat_id
     reseller = get_reseller_by_code(code)
     if not reseller:
-        await update.message.reply_text("❌ Code valid na bhai. Sothik code dao:")
+        await update.message.reply_text(
+            "❌ Ei code valid na bhai.\n\n"
+            "Sothik code dao (admin er kach theke nao):"
+        )
         return WAITING_CODE
     conn = get_db()
-    conn.run("UPDATE resellers SET telegram_chat_id = :c WHERE reseller_code = :code", c=str(chat_id), code=code)
-    conn.close()
-    await update.message.reply_text(f"✅ Welcome *{reseller['name']}* bhai!\nCode: `{code}`",
+    try:
+        conn.run("UPDATE resellers SET telegram_chat_id = :c WHERE UPPER(reseller_code) = UPPER(:code)", c=str(chat_id), code=code)
+    finally:
+        conn.close()
+    await update.message.reply_text(
+        f"✅ *Successful Register!*\n\n"
+        f"Welcome *{reseller['name']}* bhai! 🎉\n"
+        f"Tomar code: `{code}`\n\n"
+        f"Ekhon order dite paro!",
         reply_markup=reseller_main_menu(), parse_mode="Markdown")
     return ConversationHandler.END
 
@@ -674,38 +1069,80 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
     data = query.data
     chat_id = query.message.chat_id
 
+    if data == "res_price_list":
+        text = (
+            "📋 *Amar Products er Price List:*\n\n"
+            f"🤖 ChatGPT Plus (1 Month) — *৳{PRODUCTS['chatgpt']['price']}*\n"
+            f"💎 Gemini Advanced (1 Month) — *৳{PRODUCTS['gemini']['price']}*\n\n"
+            "Order dite 'Notun Order Dibo' button press koro!"
+        )
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="res_back")]]),
+            parse_mode="Markdown"
+        )
+        return
+
     if data == "res_new_order":
         keyboard = [
             [InlineKeyboardButton(f"🤖 ChatGPT Plus — ৳{PRODUCTS['chatgpt']['price']}", callback_data="res_order_chatgpt")],
             [InlineKeyboardButton(f"💎 Gemini Advanced — ৳{PRODUCTS['gemini']['price']}", callback_data="res_order_gemini")],
+            [InlineKeyboardButton("🔙 Back", callback_data="res_back")]
         ]
-        await query.edit_message_text("🛒 Kon product order korte chao?", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(
+            "🛒 *Kon product order korte chao?*\n\nProduct select koro:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
 
     elif data.startswith("res_order_"):
         product_key = data.replace("res_order_", "")
         product = PRODUCTS.get(product_key)
         if product:
-            reseller_user_data[chat_id] = {"product": product_key, "product_name": product['name'], "amount": product['price'], "state": "waiting_email"}
+            reseller_user_data[chat_id] = {
+                "product": product_key,
+                "product_name": product['name'],
+                "amount": product['price'],
+                "state": "waiting_email"
+            }
             await query.edit_message_text(
-                f"📦 *{product['name']}*\n💵 ৳{product['price']}\n\nJar jonno kincho tar *email* dao:", parse_mode="Markdown")
+                f"📦 *{product['name']}*\n"
+                f"💵 Price: ৳{product['price']}\n\n"
+                f"👇 *Customer er Gmail/email address dao:*\n"
+                f"_(Jar jonno kincho tar email)_",
+                parse_mode="Markdown"
+            )
 
     elif data == "res_pay_later":
         chat_data = reseller_user_data.get(chat_id, {})
         reseller = get_reseller_by_chat_id(chat_id)
         if reseller and chat_data:
             conn = get_db()
-            rows = conn.run(
-                "INSERT INTO reseller_bot_orders (reseller_id, reseller_code, product, customer_email, transaction_id, amount, status) VALUES (:rid, :code, :p, :e, 'PORE_DIBO', :a, 'pending') RETURNING id",
-                rid=reseller['id'], code=reseller['code'], p=chat_data['product_name'],
-                e=chat_data.get('customer_email', 'N/A'), a=chat_data['amount']
-            )
-            conn.close()
+            try:
+                rows = conn.run(
+                    "INSERT INTO reseller_bot_orders (reseller_id, reseller_code, product, customer_email, transaction_id, amount, status) "
+                    "VALUES (:rid, :code, :p, :e, 'PORE_DIBO', :a, 'pending') RETURNING id",
+                    rid=reseller['id'], code=reseller['code'],
+                    p=chat_data['product_name'],
+                    e=chat_data.get('customer_email', 'N/A'),
+                    a=chat_data['amount']
+                )
+            finally:
+                conn.close()
             order_id = rows[0][0] if rows else None
             if order_id:
                 await send_main_notification(order_id, reseller, chat_data, "PORE_DIBO (Due)")
                 await query.edit_message_text(
-                    f"✅ Order #{order_id} submit hoye geche!\n\n⚠️ Tumi *pore payment* dibe bole ache.\nBkash koro: `{BKASH_NUMBER}`\nTxn ID pathao: /txn_{order_id}_YOURTXNID",
-                    reply_markup=reseller_main_menu(), parse_mode="Markdown")
+                    f"✅ *Order #{order_id} Submit Hoye Geche!*\n\n"
+                    f"📦 {chat_data['product_name']}\n"
+                    f"📧 {chat_data.get('customer_email', 'N/A')}\n"
+                    f"💵 ৳{chat_data['amount']}\n\n"
+                    f"⚠️ Tumi *pore payment* dibe bole ache.\n\n"
+                    f"Payment korte:\n"
+                    f"📱 Bkash: `{BKASH_NUMBER}`\n"
+                    f"💬 Txn ID pathao: `/txn_{order_id}_YOURTXNID`",
+                    reply_markup=reseller_main_menu(), parse_mode="Markdown"
+                )
             reseller_user_data.pop(chat_id, None)
 
     elif data == "res_my_orders":
@@ -714,45 +1151,93 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
             await query.edit_message_text("❌ Register koro aage. /start dao.")
             return
         conn = get_db()
-        rows = conn.run("SELECT id, product, customer_email, amount, status, transaction_id FROM reseller_bot_orders WHERE reseller_code = :c ORDER BY created_at DESC LIMIT 10", c=reseller['code'])
-        conn.close()
+        try:
+            rows = conn.run(
+                "SELECT id, product, customer_email, amount, status, transaction_id, created_at "
+                "FROM reseller_bot_orders WHERE reseller_code = :c ORDER BY created_at DESC LIMIT 10",
+                c=reseller['code']
+            )
+        finally:
+            conn.close()
         if not rows:
-            await query.edit_message_text("📋 Ekhono kono order nei.",
+            await query.edit_message_text(
+                "📋 Ekhono kono order nei bhai.\n\n'Notun Order Dibo' te press koro!",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="res_back")]]))
             return
-        text = "📋 *Tomar Orders:*\n\n"
+        text = "📋 *Tomar Last 10 Order:*\n\n"
         for r in rows:
             emoji = "✅" if r[4] == "approved" else "❌" if r[4] == "rejected" else "⏳"
-            due_tag = " ⚠️DUE" if r[5] == "PORE_DIBO" else ""
-            text += f"{emoji} #{r[0]} — {r[1]}{due_tag}\n   📧 {r[2]} | ৳{r[3]} | {r[4]}\n\n"
-        await query.edit_message_text(text,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="res_back")]]), parse_mode="Markdown")
+            due_tag = " ⚠️*DUE*" if r[5] == "PORE_DIBO" else ""
+            date_str = r[6].strftime('%d %b, %I:%M %p') if r[6] else ""
+            text += (
+                f"{emoji} *#{r[0]}* — {r[1]}{due_tag}\n"
+                f"   📧 {r[2]}\n"
+                f"   💵 ৳{r[3]} | {r[4]} | {date_str}\n\n"
+            )
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="res_back")]]),
+            parse_mode="Markdown"
+        )
 
     elif data == "res_back":
         reseller = get_reseller_by_chat_id(chat_id)
         name = reseller['name'] if reseller else "Bhai"
-        await query.edit_message_text(f"Ki korte chao {name}?", reply_markup=reseller_main_menu())
+        await query.edit_message_text(
+            f"Ki korte chao *{name}* bhai? 👇",
+            reply_markup=reseller_main_menu(),
+            parse_mode="Markdown"
+        )
 
 async def send_main_notification(order_id, reseller, chat_data, txn_id):
+    """✅ FIX: MAIN_CHAT_ID এখন top-level এ define করা, আর robust error logging"""
     try:
         from telegram import Bot
         main_bot = Bot(token=BOT_TOKEN)
         due_tag = "⚠️ *DUE ORDER* — Payment baaki!\n\n" if txn_id == "PORE_DIBO (Due)" else ""
-        msg = (f"🔔 *Notun Reseller Order!*\n\n{due_tag}"
-               f"👤 {reseller['name']} ({reseller['code']})\n"
-               f"📦 {chat_data['product_name']}\n"
-               f"📧 {chat_data.get('customer_email', 'N/A')}\n"
-               f"💳 TxnID: {txn_id}\n"
-               f"💵 ৳{chat_data['amount']}\n"
-               f"🆔 Order #{order_id}")
-        keyboard = [[InlineKeyboardButton("✅ Approve", callback_data=f"rapprove_{order_id}"),
-                     InlineKeyboardButton("❌ Reject", callback_data=f"rreject_{order_id}")]]
-        await main_bot.send_message(chat_id=MAIN_CHAT_ID, text=msg,
-            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        msg = (
+            f"🔔 *Notun Reseller Order!*\n\n{due_tag}"
+            f"👤 {reseller['name']} ({reseller['code']})\n"
+            f"📦 {chat_data['product_name']}\n"
+            f"📧 {chat_data.get('customer_email', 'N/A')}\n"
+            f"💳 TxnID: {txn_id}\n"
+            f"💵 ৳{chat_data['amount']}\n"
+            f"🆔 Order #{order_id}"
+        )
+        keyboard = [[
+            InlineKeyboardButton("✅ Approve", callback_data=f"rapprove_{order_id}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"rreject_{order_id}")
+        ]]
+        await main_bot.send_message(
+            chat_id=MAIN_CHAT_ID,
+            text=msg,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        logger.info(f"✅ Main bot notification sent for order #{order_id}")
     except Exception as e:
-        logger.error(f"Main bot notify error: {e}")
+        logger.error(f"❌ Main bot notify error for order #{order_id}: {e}")
 
-MAIN_CHAT_ID = os.environ.get("CHAT_ID")
+async def reseller_paynow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat_id
+    if chat_id not in reseller_user_data:
+        await query.edit_message_text("❌ Session শেষ হয়ে গেছে। আবার /start দাও।")
+        return
+    reseller_user_data[chat_id]["state"] = "waiting_transaction"
+    amount = reseller_user_data[chat_id].get('amount', 0)
+    product_name = reseller_user_data[chat_id].get('product_name', '')
+    await query.edit_message_text(
+        f"💳 *Payment Details:*\n\n"
+        f"📦 Product: {product_name}\n"
+        f"💵 Amount: ৳{amount}\n\n"
+        f"👇 Bkash koro ei number e:\n"
+        f"📱 *{BKASH_NUMBER}* (Send Money)\n\n"
+        f"Payment er por *Transaction ID* dao:\n"
+        f"_(Example: 8N6A7B3X2Y)_",
+        parse_mode="Markdown"
+    )
 
 async def reseller_handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -764,21 +1249,34 @@ async def reseller_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
         if len(parts) >= 3:
             try:
                 order_id = int(parts[1])
-                txn_id = "_".join(parts[2:])
+                txn_id = "_".join(parts[2:])   # ✅ FIX: সব parts join
                 if len(txn_id) < 6:
                     await update.message.reply_text("❌ Transaction ID valid na. Minimum 6 character lagbe!")
                     return
                 conn = get_db()
-                conn.run("UPDATE reseller_bot_orders SET transaction_id = :t WHERE id = :id", t=txn_id, id=order_id)
-                conn.close()
+                try:
+                    conn.run("UPDATE reseller_bot_orders SET transaction_id = :t WHERE id = :id", t=txn_id, id=order_id)
+                finally:
+                    conn.close()
                 # Notify admin
                 from telegram import Bot
                 main_bot = Bot(token=BOT_TOKEN)
-                await main_bot.send_message(chat_id=MAIN_CHAT_ID,
-                    text=f"💳 Order #{order_id} er Transaction ID update hoye geche!\nTxnID: {txn_id}",
-                    parse_mode="Markdown")
-                await update.message.reply_text(f"✅ Transaction ID submit hoye geche! Order #{order_id}\nAdmin verify korbe.", reply_markup=reseller_main_menu())
-            except:
+                await main_bot.send_message(
+                    chat_id=MAIN_CHAT_ID,
+                    text=(
+                        f"💳 *Transaction ID Update!*\n\n"
+                        f"Order #{order_id} er payment eshe geche!\n"
+                        f"TxnID: `{txn_id}`\n\n"
+                        f"Verify kore approve koro 👆"
+                    ),
+                    parse_mode="Markdown"
+                )
+                await update.message.reply_text(
+                    f"✅ Transaction ID submit hoye geche!\n\nOrder #{order_id}\nAdmin verify korbe shighroi.",
+                    reply_markup=reseller_main_menu()
+                )
+            except Exception as e:
+                logger.error(f"TXN update error: {e}")
                 await update.message.reply_text("❌ Format thik na. Example: /txn_1_TXN123456")
         return
 
@@ -792,22 +1290,31 @@ async def reseller_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if state == "waiting_email":
         if '@' not in text or '.' not in text:
-            await update.message.reply_text("❌ Valid email dao (e.g. example@gmail.com):")
+            await update.message.reply_text(
+                "❌ Valid email dao bhai!\n\nExample: example@gmail.com"
+            )
             return
         reseller_user_data[chat_id]["customer_email"] = text
         reseller_user_data[chat_id]["state"] = "waiting_transaction"
 
         keyboard = [
-            [InlineKeyboardButton("💳 Ekhon payment korbo", callback_data="res_pay_now")],
-            [InlineKeyboardButton("⏰ Pore dibo", callback_data="res_pay_later")]
+            [InlineKeyboardButton("💳 Ekhoni Payment Korbo", callback_data="res_pay_now")],
+            [InlineKeyboardButton("⏰ Pore Payment Dibo", callback_data="res_pay_later")]
         ]
         await update.message.reply_text(
-            f"📧 Email: `{text}`\n\n💵 Amount: ৳{user_state['amount']}\n\nPayment ki ekhon korbe naki pore?",
-            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+            f"✅ Email নেওয়া হয়েছে!\n\n"
+            f"📧 Email: `{text}`\n"
+            f"📦 Product: {user_state['product_name']}\n"
+            f"💵 Amount: ৳{user_state['amount']}\n\n"
+            f"💳 Payment ki ekhon korbe naki pore?",
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
+        )
 
     elif state == "waiting_transaction":
         if len(text) < 6:
-            await update.message.reply_text("❌ Transaction ID valid na bhai! Minimum 6 character lagbe. Sothik ID dao:")
+            await update.message.reply_text(
+                "❌ Transaction ID valid na bhai!\n\nMinimum 6 character lagbe. Sothik ID dao:"
+            )
             return
 
         reseller_user_data[chat_id]["state"] = None
@@ -816,33 +1323,37 @@ async def reseller_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
         amount = user_state.get("amount")
 
         conn = get_db()
-        rows = conn.run(
-            "INSERT INTO reseller_bot_orders (reseller_id, reseller_code, product, customer_email, transaction_id, amount, status) VALUES (:rid, :code, :p, :e, :t, :a, 'pending') RETURNING id",
-            rid=reseller['id'], code=reseller['code'], p=product_name, e=customer_email, t=text, a=amount
-        )
-        conn.close()
+        try:
+            rows = conn.run(
+                "INSERT INTO reseller_bot_orders (reseller_id, reseller_code, product, customer_email, transaction_id, amount, status) "
+                "VALUES (:rid, :code, :p, :e, :t, :a, 'pending') RETURNING id",
+                rid=reseller['id'], code=reseller['code'],
+                p=product_name, e=customer_email, t=text, a=amount
+            )
+        finally:
+            conn.close()
         order_id = rows[0][0] if rows else None
 
         if order_id:
             await send_main_notification(order_id, reseller, user_state, text)
             await update.message.reply_text(
-                f"✅ *Order Submit Hoye Geche!*\n\n📋 #{order_id}\n📦 {product_name}\n📧 {customer_email}\n💳 {text}\n💵 ৳{amount}\n\n⏳ Admin confirm korle notify pabe!",
-                reply_markup=reseller_main_menu(), parse_mode="Markdown")
+                f"✅ *Order Submit Hoye Geche!*\n\n"
+                f"🆔 Order: #{order_id}\n"
+                f"📦 {product_name}\n"
+                f"📧 {customer_email}\n"
+                f"💳 TxnID: {text}\n"
+                f"💵 ৳{amount}\n\n"
+                f"⏳ Admin confirm korle tumi notify pabe! Dhonnobad 🙏",
+                reply_markup=reseller_main_menu(), parse_mode="Markdown"
+            )
         else:
             await update.message.reply_text("❌ Problem hoye geche. Abar try koro.")
         reseller_user_data.pop(chat_id, None)
     else:
-        await update.message.reply_text("Menu theke kaj koro:", reply_markup=reseller_main_menu())
-
-async def reseller_paynow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    chat_id = query.message.chat_id
-    reseller_user_data[chat_id]["state"] = "waiting_transaction"
-    amount = reseller_user_data[chat_id].get('amount', 0)
-    await query.edit_message_text(
-        f"💳 Bkash koro: `{BKASH_NUMBER}`\nAmount: ৳{amount}\n\nPayment er por *Transaction ID* dao:",
-        parse_mode="Markdown")
+        await update.message.reply_text(
+            "Menu theke kaj koro bhai 👇",
+            reply_markup=reseller_main_menu()
+        )
 
 # =================== FLASK WEBHOOK ===================
 
@@ -866,11 +1377,18 @@ def woocommerce_webhook():
         status = data.get('status', 'pending')
         items_text = ", ".join([f"{i['name']} x{i['quantity']}" for i in data.get('line_items', [])])
         conn = get_db()
-        conn.run("INSERT INTO orders (woo_order_id, customer_name, customer_email, total, status, items) VALUES (:o, :n, :e, :t, :s, :i)",
-                 o=order_id, n=customer_name, e=customer_email, t=total, s=status, i=items_text)
-        conn.run("INSERT INTO income (amount, note, type) VALUES (:a, :n, 'auto')", a=total, n=f"WooCommerce Order #{order_id}")
-        conn.close()
-        msg = f"🛍️ *Notun Order!*\n\n📋 #{order_id}\n👤 {customer_name}\n📧 {customer_email}\n📦 {items_text}\n💵 ৳{total}\n📊 {status}"
+        try:
+            conn.run(
+                "INSERT INTO orders (woo_order_id, customer_name, customer_email, total, status, items) VALUES (:o, :n, :e, :t, :s, :i)",
+                o=order_id, n=customer_name, e=customer_email, t=total, s=status, i=items_text
+            )
+            conn.run(
+                "INSERT INTO income (amount, note, type) VALUES (:a, :n, 'auto')",
+                a=total, n=f"WooCommerce Order #{order_id}"
+            )
+        finally:
+            conn.close()
+        msg = f"🛍️ *Notun WooCommerce Order!*\n\n📋 #{order_id}\n👤 {customer_name}\n📧 {customer_email}\n📦 {items_text}\n💵 ৳{total}\n📊 {status}"
         asyncio.run_coroutine_threadsafe(send_telegram_message(msg), main_loop)
         return jsonify({"status": "ok"}), 200
     except Exception as e:
@@ -879,7 +1397,7 @@ def woocommerce_webhook():
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "running"}), 200
+    return jsonify({"status": "running", "bkash": BKASH_NUMBER}), 200
 
 async def send_telegram_message(message):
     from telegram import Bot
@@ -915,6 +1433,7 @@ async def main():
     )
     reseller_app = Application.builder().token(RESELLER_BOT_TOKEN).build()
     reseller_app.add_handler(reseller_conv)
+    # ✅ FIX: pay_now আগে register হবে, তারপর general button handler
     reseller_app.add_handler(CallbackQueryHandler(reseller_paynow_handler, pattern="^res_pay_now$"))
     reseller_app.add_handler(CallbackQueryHandler(reseller_button_handler))
     reseller_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reseller_handle_text))
@@ -929,7 +1448,6 @@ async def main():
         await main_app.updater.start_polling()
         await reseller_app.updater.start_polling()
 
-        # Start due reminder background task
         asyncio.create_task(send_due_reminders())
 
         await asyncio.Event().wait()
