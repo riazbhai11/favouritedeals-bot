@@ -295,6 +295,34 @@ def db_get_reseller_summary(reseller_name=None):
         })
     return result
 
+def db_get_payment_due_summary():
+    """কোন reseller কত টাকা এখনো দেয়নি"""
+    conn = get_db()
+    try:
+        rows = conn.run("""
+            SELECT
+                rbo.reseller_code,
+                r.name,
+                COUNT(rbo.id)        AS due_orders,
+                SUM(rbo.amount)      AS due_amount
+            FROM reseller_bot_orders rbo
+            LEFT JOIN resellers r ON r.id = rbo.reseller_id
+            WHERE rbo.status = 'payment_due'
+            GROUP BY rbo.reseller_code, r.name
+            ORDER BY due_amount DESC
+        """)
+    finally:
+        conn.close()
+    return [
+        {
+            "reseller_code": r[0],
+            "name":          r[1] or "Unknown",
+            "due_orders":    r[2] or 0,
+            "due_amount":    f"৳{float(r[3] or 0):.0f}"
+        }
+        for r in rows
+    ]
+
 def db_get_today_reseller_bot_orders():
     conn = get_db()
     try:
@@ -656,6 +684,16 @@ AI_FUNCTIONS = [
         "parameters": {"type":"object","properties":{}}
     },
     {
+        "name": "get_payment_due_summary",
+        "description": (
+            "Kon reseller ekhono taka dey nai, koto taka baki ache — "
+            "'due baki', 'payment dey nai', 'taka pawa jache na', "
+            "'RS001 er due ache kina', 'kono reseller er payment baki' — "
+            "ei dharoner jigges hole OBOSSOI ei function call koro."
+        ),
+        "parameters": {"type":"object","properties":{}}
+    },
+    {
         "name": "search_orders_by_name",
         "description": "Customer naam diye WooCommerce order khojo",
         "parameters": {"type":"object","properties":{
@@ -706,6 +744,8 @@ def execute_function(name, args):
             return db_get_reseller_summary(args.get("reseller_name"))
         elif name == "get_all_reseller_summary":
             return db_get_reseller_summary()
+        elif name == "get_payment_due_summary":
+            return db_get_payment_due_summary()
         elif name == "search_orders_by_name":
             return db_search_orders_by_name(args["name"])
         elif name == "add_income":
@@ -747,6 +787,7 @@ Khaas rules:
 - "reseller theke aaj ki" → get_today_reseller_bot_orders
 - "sob reseller er hishab" → get_all_reseller_summary
 - Specific reseller → get_reseller_summary (code/naam diye)
+- "due baki", "payment dey nai", "taka pawa jacche na", "RS001 er due ache kina", "kono reseller baki ache" → get_payment_due_summary
 - Sob takar response e ৳ sign use korbe
 - Spelling thik rakho — bangla shobdo English harf e lekho
 {mem_text}"""
@@ -803,6 +844,7 @@ def main_menu_keyboard():
         [InlineKeyboardButton("🔍 Customer খোঁজো",         callback_data="search_customer"),
          InlineKeyboardButton("⏳ Pending Orders",           callback_data="pending_orders")],
         [InlineKeyboardButton("🛍️ Reseller Bot Orders আজ",  callback_data="reseller_bot_orders_today")],
+        [InlineKeyboardButton("💸 Due বাকি (Reseller)",     callback_data="due_baki")],
     ])
 
 # =================== MAIN BOT — HANDLERS ===================
@@ -999,6 +1041,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "resellers":                  await show_resellers(query)
     elif data == "pending_orders":             await show_orders_by_status(query, "pending")
     elif data == "reseller_bot_orders_today":  await show_reseller_bot_orders_today(query)
+    elif data == "due_baki":                   await show_due_baki(query)
     elif data == "manual_income":
         await query.edit_message_text("💰 Format: `/income 500 bkash e paisi`", parse_mode="Markdown")
     elif data == "search_customer":
@@ -1012,6 +1055,57 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("setstatus_"):
         parts = data.split("_")
         await update_order_status_btn(query, parts[1], parts[2])
+    elif data.startswith("remind_reseller_"):
+        # reseller code দিয়ে সব payment_due orders remind করো
+        reseller_code = data.replace("remind_reseller_", "")
+        conn = get_db()
+        try:
+            orders = conn.run(
+                "SELECT id, product, amount FROM reseller_bot_orders "
+                "WHERE reseller_code=:c AND status='payment_due'",
+                c=reseller_code)
+        finally:
+            conn.close()
+        if not orders:
+            await query.edit_message_text(
+                f"✅ {reseller_code} এর কোনো due order নেই।",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Due List", callback_data="due_baki")]])); return
+        # প্রতিটা order এর জন্য reminder পাঠাও
+        count = 0
+        for o in orders:
+            order_id, product, amount = o[0], o[1], o[2]
+            try:
+                from telegram import Bot
+                pay_keyboard = [[
+                    InlineKeyboardButton("💳 Payment করব", callback_data=f"res_pay_order_{order_id}")
+                ]]
+                conn2 = get_db()
+                try:
+                    rr = conn2.run(
+                        "SELECT telegram_chat_id FROM resellers WHERE UPPER(reseller_code)=UPPER(:c)",
+                        c=reseller_code)
+                finally:
+                    conn2.close()
+                if rr and rr[0][0]:
+                    await Bot(token=RESELLER_BOT_TOKEN).send_message(
+                        chat_id=rr[0][0],
+                        text=(
+                            f"⏰ *Admin Reminder!*\n\n"
+                            f"Order #{order_id} — {product}\n"
+                            f"💵 ৳{amount} payment বাকি আছে!\n\n"
+                            f"এখনই payment করো 👇"
+                        ),
+                        reply_markup=InlineKeyboardMarkup(pay_keyboard),
+                        parse_mode="Markdown"
+                    )
+                    count += 1
+            except Exception as e:
+                logger.error(f"Remind reseller error: {e}")
+        await query.edit_message_text(
+            f"✅ *{reseller_code} কে {count}টা reminder পাঠানো হয়েছে!*",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Due List", callback_data="due_baki")]]),
+            parse_mode="Markdown")
+
     elif data.startswith("confirm_remove_reseller_"):
         # confirm_remove_reseller_{reseller_id}_{code}
         parts       = data.split("_", 4)   # ['confirm', 'remove', 'reseller', id, code]
@@ -1184,7 +1278,29 @@ async def show_reseller_bot_orders_today(query):
     keyboard.append([InlineKeyboardButton("🔙 Menu", callback_data="menu")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-async def show_status_options(query, order_id):
+async def show_due_baki(query):
+    """কোন reseller কত টাকা এখনো দেয়নি"""
+    due_list = db_get_payment_due_summary()
+    if not due_list:
+        await query.edit_message_text(
+            "✅ *সব clear!*\n\nকোনো reseller এর payment বাকি নেই।",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]),
+            parse_mode="Markdown"); return
+
+    total_due = sum(float(d["due_amount"].replace("৳","")) for d in due_list)
+    text = f"💸 *Due বাকি — Reseller Payment:*\n\n"
+    keyboard = []
+    for d in due_list:
+        text += (f"🔸 *{d['name']}* (`{d['reseller_code']}`)\n"
+                 f"   📦 {d['due_orders']}টা order | 💵 {d['due_amount']} বাকি\n\n")
+        keyboard.append([
+            InlineKeyboardButton(
+                f"📩 {d['name']} কে Remind করো",
+                callback_data=f"remind_reseller_{d['reseller_code']}")
+        ])
+    text += f"💰 *মোট বাকি: ৳{total_due:.0f}*"
+    keyboard.append([InlineKeyboardButton("🔙 Menu", callback_data="menu")])
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     keyboard = [
         [InlineKeyboardButton("⏳ Processing",      callback_data=f"setstatus_{order_id}_processing")],
         [InlineKeyboardButton("✅ Completed",        callback_data=f"setstatus_{order_id}_completed")],
