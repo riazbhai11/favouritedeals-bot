@@ -12,6 +12,7 @@ import nest_asyncio
 import requests as req
 from urllib.parse import urlparse
 import json
+import re
 
 nest_asyncio.apply()
 
@@ -35,8 +36,6 @@ BKASH_NUMBER       = os.environ.get("BKASH_NUMBER", "01997806925")
 NAGAD_NUMBER       = os.environ.get("NAGAD_NUMBER", "01997806925")
 WP_URL             = os.environ.get("WP_URL", "https://favouritedeals.online")
 WP_PAYLATER_SECRET = os.environ.get("WP_PAYLATER_SECRET", "")
-CHATGPT_PRODUCT_ID = int(os.environ.get("CHATGPT_PRODUCT_ID", "0"))
-GEMINI_PRODUCT_ID  = int(os.environ.get("GEMINI_PRODUCT_ID", "0"))
 
 # Status constants
 STATUS_PENDING            = "pending"
@@ -212,7 +211,7 @@ def db_update_order_status(order_id, new_status, use_woo_id=False):
     finally:
         conn.close()
     try:
-        req.put(f"https://favouritedeals.online/wp-json/wc/v3/orders/{woo_id}",
+        req.put(f"{WP_URL}/wp-json/wc/v3/orders/{woo_id}",
                 json={"status": new_status}, auth=(WC_KEY, WC_SECRET), timeout=10)
     except Exception as e:
         logger.error(f"WC update error: {e}")
@@ -298,28 +297,17 @@ def db_get_payment_due_summary():
     conn = get_db()
     try:
         rows = conn.run("""
-            SELECT
-                rbo.reseller_code,
-                r.name,
-                COUNT(rbo.id)        AS due_orders,
-                SUM(rbo.amount)      AS due_amount
+            SELECT rbo.reseller_code, r.name, COUNT(rbo.id), SUM(rbo.amount)
             FROM reseller_bot_orders rbo
             LEFT JOIN resellers r ON r.id = rbo.reseller_id
             WHERE rbo.status = 'payment_due'
             GROUP BY rbo.reseller_code, r.name
-            ORDER BY due_amount DESC
+            ORDER BY SUM(rbo.amount) DESC
         """)
     finally:
         conn.close()
-    return [
-        {
-            "reseller_code": r[0],
-            "name":          r[1] or "Unknown",
-            "due_orders":    r[2] or 0,
-            "due_amount":    f"৳{float(r[3] or 0):.0f}"
-        }
-        for r in rows
-    ]
+    return [{"reseller_code":r[0],"name":r[1] or "Unknown","due_orders":r[2] or 0,
+             "due_amount":f"৳{float(r[3] or 0):.0f}"} for r in rows]
 
 def db_get_today_reseller_bot_orders():
     conn = get_db()
@@ -331,8 +319,7 @@ def db_get_today_reseller_bot_orders():
                    rbo.transaction_id, rbo.payment_method, rbo.created_at
             FROM reseller_bot_orders rbo
             LEFT JOIN resellers r ON r.id=rbo.reseller_id
-            WHERE rbo.created_at >= :s
-            ORDER BY rbo.created_at DESC
+            WHERE rbo.created_at >= :s ORDER BY rbo.created_at DESC
         """, s=since)
     finally:
         conn.close()
@@ -344,8 +331,7 @@ def db_get_combined_today_summary():
     conn = get_db()
     try:
         since = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        woo = conn.run(
-            "SELECT COUNT(*), COALESCE(SUM(total),0) FROM orders WHERE created_at>=:s", s=since)
+        woo = conn.run("SELECT COUNT(*), COALESCE(SUM(total),0) FROM orders WHERE created_at>=:s", s=since)
         res = conn.run(
             "SELECT COUNT(*), COALESCE(SUM(amount),0) FROM reseller_bot_orders "
             "WHERE created_at>=:s AND status != 'rejected'", s=since)
@@ -353,29 +339,21 @@ def db_get_combined_today_summary():
             SELECT rbo.reseller_code, r.name, rbo.product, rbo.amount, rbo.status, rbo.created_at
             FROM reseller_bot_orders rbo
             LEFT JOIN resellers r ON r.id=rbo.reseller_id
-            WHERE rbo.created_at>=:s
-            ORDER BY rbo.created_at DESC
+            WHERE rbo.created_at>=:s ORDER BY rbo.created_at DESC
         """, s=since)
     finally:
         conn.close()
-
     woo_count = woo[0][0] or 0
     woo_total = float(woo[0][1] or 0)
     res_count = res[0][0] or 0
     res_total = float(res[0][1] or 0)
-    detail_list = [
-        {"reseller_code": r[0], "reseller_name": r[1], "product": r[2],
-         "amount": f"৳{r[3]}", "status": r[4], "time": str(r[5])}
-        for r in res_detail
-    ]
+    detail_list = [{"reseller_code":r[0],"reseller_name":r[1],"product":r[2],
+                    "amount":f"৳{r[3]}","status":r[4],"time":str(r[5])} for r in res_detail]
     return {
-        "woocommerce_orders":   woo_count,
-        "woocommerce_revenue":  f"৳{woo_total:.0f}",
-        "reseller_bot_orders":  res_count,
-        "reseller_bot_revenue": f"৳{res_total:.0f}",
-        "total_orders":         woo_count + res_count,
-        "total_revenue":        f"৳{woo_total + res_total:.0f}",
-        "reseller_order_details": detail_list
+        "woocommerce_orders":woo_count,"woocommerce_revenue":f"৳{woo_total:.0f}",
+        "reseller_bot_orders":res_count,"reseller_bot_revenue":f"৳{res_total:.0f}",
+        "total_orders":woo_count+res_count,"total_revenue":f"৳{woo_total+res_total:.0f}",
+        "reseller_order_details":detail_list
     }
 
 def get_reseller_bot_order(order_id):
@@ -388,12 +366,9 @@ def get_reseller_bot_order(order_id):
     finally:
         conn.close()
     if rows:
-        return {
-            "id": rows[0][0], "reseller_code": rows[0][1], "product": rows[0][2],
-            "customer_email": rows[0][3], "amount": str(rows[0][4]),
-            "status": rows[0][5], "transaction_id": rows[0][6],
-            "payment_method": rows[0][7], "reminder_count": rows[0][8]
-        }
+        return {"id":rows[0][0],"reseller_code":rows[0][1],"product":rows[0][2],
+                "customer_email":rows[0][3],"amount":str(rows[0][4]),"status":rows[0][5],
+                "transaction_id":rows[0][6],"payment_method":rows[0][7],"reminder_count":rows[0][8]}
     return None
 
 def get_reseller_by_chat_id(chat_id):
@@ -405,7 +380,7 @@ def get_reseller_by_chat_id(chat_id):
     finally:
         conn.close()
     if rows:
-        return {"id": rows[0][0], "name": rows[0][1], "phone": rows[0][2], "code": rows[0][3]}
+        return {"id":rows[0][0],"name":rows[0][1],"phone":rows[0][2],"code":rows[0][3]}
     return None
 
 def get_reseller_by_code(code):
@@ -416,7 +391,7 @@ def get_reseller_by_code(code):
     finally:
         conn.close()
     if rows:
-        return {"id": rows[0][0], "name": rows[0][1], "phone": rows[0][2]}
+        return {"id":rows[0][0],"name":rows[0][1],"phone":rows[0][2]}
     return None
 
 def get_payment_due_orders():
@@ -425,37 +400,28 @@ def get_payment_due_orders():
         rows = conn.run("""
             SELECT id, reseller_code, product, customer_email, amount,
                    payment_reminder_count, payment_due_at
-            FROM reseller_bot_orders
-            WHERE status = 'payment_due'
+            FROM reseller_bot_orders WHERE status = 'payment_due'
         """)
     finally:
         conn.close()
     return [{"id":r[0],"reseller_code":r[1],"product":r[2],"customer_email":r[3],
              "amount":str(r[4]),"reminder_count":r[5],"due_at":str(r[6])} for r in rows]
 
-# =================== WOOCOMMERCE SUBSCRIPTION API ===================
+# =================== WOOCOMMERCE API ===================
 
 def wc_get(endpoint, params=None):
     try:
-        resp = req.get(
-            f"{WP_URL}/wp-json/wc/v3/{endpoint}",
-            auth=(WC_KEY, WC_SECRET),
-            params=params or {},
-            timeout=15
-        )
+        resp = req.get(f"{WP_URL}/wp-json/wc/v3/{endpoint}",
+                       auth=(WC_KEY, WC_SECRET), params=params or {}, timeout=15)
         return resp.json()
     except Exception as e:
         logger.error(f"WC GET error [{endpoint}]: {e}")
         return None
 
-def wc_post(endpoint, data):
+def wc_post_req(endpoint, data):
     try:
-        resp = req.post(
-            f"{WP_URL}/wp-json/wc/v3/{endpoint}",
-            auth=(WC_KEY, WC_SECRET),
-            json=data,
-            timeout=15
-        )
+        resp = req.post(f"{WP_URL}/wp-json/wc/v3/{endpoint}",
+                        auth=(WC_KEY, WC_SECRET), json=data, timeout=15)
         return resp.json()
     except Exception as e:
         logger.error(f"WC POST error [{endpoint}]: {e}")
@@ -463,16 +429,122 @@ def wc_post(endpoint, data):
 
 def wc_put(endpoint, data):
     try:
-        resp = req.put(
-            f"{WP_URL}/wp-json/wc/v3/{endpoint}",
-            auth=(WC_KEY, WC_SECRET),
-            json=data,
-            timeout=15
-        )
+        resp = req.put(f"{WP_URL}/wp-json/wc/v3/{endpoint}",
+                       auth=(WC_KEY, WC_SECRET), json=data, timeout=15)
         return resp.json()
     except Exception as e:
         logger.error(f"WC PUT error [{endpoint}]: {e}")
         return None
+
+# =================== DYNAMIC PRODUCT FETCHING ===================
+
+def fetch_subscription_products():
+    """
+    WooCommerce থেকে সব subscription products fetch করো।
+    'subscriptions' category তে যা আছে সব আনবে।
+    """
+    try:
+        result = wc_get("products", {
+            "category": "329",  # Subscriptions category ID তোমার site এ
+            "per_page": 20,
+            "status": "publish",
+            "type": "variable"
+        })
+        if not result or isinstance(result, dict):
+            return []
+        products = []
+        for p in result:
+            products.append({
+                "id": p["id"],
+                "name": p["name"],
+                "price": p.get("price", "0"),
+                "variation_ids": p.get("variations", []),
+                "slug": p.get("slug", "")
+            })
+        return products
+    except Exception as e:
+        logger.error(f"Product fetch error: {e}")
+        return []
+
+def fetch_product_variations(product_id):
+    """একটা product এর সব variations fetch করো"""
+    try:
+        result = wc_get(f"products/{product_id}/variations", {"per_page": 20})
+        if not result or isinstance(result, dict):
+            return []
+        variations = []
+        for v in result:
+            if v.get("status") == "publish" and v.get("stock_status") == "instock":
+                attr_name = ""
+                if v.get("attributes"):
+                    attr_name = v["attributes"][0].get("option", "")
+                # Clean up HTML from description
+                desc = re.sub(r'<[^>]+>', '', v.get("description", "")).strip()
+                desc = desc[:100] if len(desc) > 100 else desc
+                variations.append({
+                    "id": v["id"],
+                    "name": attr_name or v.get("name", f"Plan #{v['id']}"),
+                    "price": v.get("price", "0"),
+                    "description": desc,
+                    "attribute_slug": v["attributes"][0].get("slug", "") if v.get("attributes") else "",
+                    "attribute_option": attr_name
+                })
+        return variations
+    except Exception as e:
+        logger.error(f"Variation fetch error for product {product_id}: {e}")
+        return []
+
+def create_order_with_variation(email, phone, password, product_id, variation_id, variation_attributes):
+    """
+    নতুন customer + order create করো (variation সহ)
+    variation_attributes: dict like {"package-duration-and-type": "Lovable Pro 1M (105 Credits)"}
+    """
+    # Step 1: Customer create
+    username = email.split("@")[0] + str(product_id)[-3:]
+    customer = wc_post_req("customers", {
+        "email": email,
+        "username": username,
+        "password": password,
+        "billing": {"email": email, "phone": phone},
+        "shipping": {"email": email}
+    })
+    if not customer or "id" not in customer:
+        # Customer হয়তো already exist করে, email দিয়ে খোঁজো
+        existing = wc_get("customers", {"email": email})
+        if existing and len(existing) > 0:
+            customer = existing[0]
+        else:
+            err = customer.get("message", "Customer create হয়নি") if customer else "Customer create হয়নি"
+            return None, err
+
+    customer_id = customer["id"]
+
+    # Step 2: Order create with variation
+    line_item = {
+        "product_id": product_id,
+        "quantity": 1
+    }
+    if variation_id:
+        line_item["variation_id"] = variation_id
+        if variation_attributes:
+            line_item["meta_data"] = [
+                {"key": f"attribute_{k}", "value": v}
+                for k, v in variation_attributes.items()
+            ]
+
+    order = wc_post_req("orders", {
+        "customer_id": customer_id,
+        "payment_method": "bacs",
+        "payment_method_title": "Manual Payment",
+        "set_paid": False,
+        "billing": {"email": email, "phone": phone},
+        "line_items": [line_item]
+    })
+    if not order or "id" not in order:
+        err = order.get("message", "Order create হয়নি") if order else "Order create হয়নি"
+        return None, err
+
+    return order, None
 
 def get_subscriptions_by_email(email):
     """Email দিয়ে সব WooCommerce subscriptions খোঁজো"""
@@ -493,66 +565,27 @@ def get_subscriptions_by_email(email):
         return []
 
 def create_renewal_order(sub_id):
-    """Renewal order create করো"""
     try:
         resp = req.post(
             f"{WP_URL}/wp-json/wc/v3/subscriptions/{sub_id}/orders",
-            auth=(WC_KEY, WC_SECRET),
-            json={},
-            timeout=15
-        )
+            auth=(WC_KEY, WC_SECRET), json={}, timeout=15)
         return resp.json()
     except Exception as e:
         logger.error(f"Renewal order error: {e}")
         return None
 
-def generate_payment_link(order_id):
-    """WooCommerce order payment link"""
-    return f"{WP_URL}/checkout/order-pay/{order_id}/?pay_for_order=true&key=wc_order_{order_id}"
+def generate_payment_link(order_id, order_key=None):
+    if order_key:
+        return f"{WP_URL}/checkout/order-pay/{order_id}/?pay_for_order=true&key={order_key}"
+    # order_key না থাকলে API থেকে নাও
+    order = wc_get(f"orders/{order_id}")
+    if order and order.get("order_key"):
+        key = order["order_key"]
+        return f"{WP_URL}/checkout/order-pay/{order_id}/?pay_for_order=true&key={key}"
+    return f"{WP_URL}/my-account/"
 
-def create_new_customer_and_subscription(email, phone, password, product_id):
-    """নতুন customer + order create করো"""
-    # Step 1: Customer create
-    customer = wc_post("customers", {
-        "email":    email,
-        "username": email.split("@")[0],
-        "password": password,
-        "billing":  {"email": email, "phone": phone},
-        "shipping": {"email": email}
-    })
-    if not customer or "id" not in customer:
-        err = customer.get("message", "Customer create হয়নি") if customer else "Customer create হয়নি"
-        return None, err
-
-    # Step 2: Order create
-    order = wc_post("orders", {
-        "customer_id":         customer["id"],
-        "payment_method":      "bacs",
-        "payment_method_title":"Manual Payment",
-        "set_paid":            False,
-        "billing":             {"email": email, "phone": phone},
-        "line_items":          [{"product_id": product_id, "quantity": 1}]
-    })
-    if not order or "id" not in order:
-        err = order.get("message", "Order create হয়নি") if order else "Order create হয়নি"
-        return None, err
-
-    return order, None
-
-SUB_STATUS_EMOJI = {
-    "active":    "✅",
-    "on-hold":   "⏸️",
-    "cancelled": "❌",
-    "expired":   "⌛",
-    "pending":   "🕐",
-}
-SUB_STATUS_LABEL = {
-    "active":    "Active",
-    "on-hold":   "On Hold",
-    "cancelled": "Cancelled",
-    "expired":   "Expired",
-    "pending":   "Pending",
-}
+SUB_STATUS_EMOJI = {"active":"✅","on-hold":"⏸️","cancelled":"❌","expired":"⌛","pending":"🕐"}
+SUB_STATUS_LABEL = {"active":"Active","on-hold":"On Hold","cancelled":"Cancelled","expired":"Expired","pending":"Pending"}
 
 def format_subscription_text(sub):
     sub_id     = sub.get("id", "?")
@@ -584,8 +617,8 @@ async def notify_reseller(reseller_code, message, parse_mode="Markdown"):
             conn.close()
         if rows and rows[0][0]:
             from telegram import Bot
-            bot = Bot(token=RESELLER_BOT_TOKEN)
-            await bot.send_message(chat_id=rows[0][0], text=message, parse_mode=parse_mode)
+            await Bot(token=RESELLER_BOT_TOKEN).send_message(
+                chat_id=rows[0][0], text=message, parse_mode=parse_mode)
     except Exception as e:
         logger.error(f"Reseller notify error [{reseller_code}]: {e}")
 
@@ -596,24 +629,18 @@ async def send_new_order_notification(order_id, reseller, product_name, customer
         if txn_id and txn_id != "LATER":
             method_label = "Nagad" if payment_method == "nagad" else "Bkash"
             txn_line = f"💳 {method_label} TxnID: `{txn_id}`\n"
-        msg = (
-            f"🔔 *নতুন Reseller Order!*\n\n"
-            f"👤 {reseller['name']}  (`{reseller['code']}`)\n"
-            f"📦 {product_name}\n"
-            f"📧 Customer Email: `{customer_email}`\n"
-            f"💵 Amount: ৳{amount}\n"
-            f"{txn_line}"
-            f"🆔 Order #{order_id}\n\n"
-            f"Stock আছে + টাকা পেলে Approve করো।"
-        )
+        msg = (f"🔔 *নতুন Reseller Order!*\n\n"
+               f"👤 {reseller['name']}  (`{reseller['code']}`)\n"
+               f"📦 {product_name}\n📧 Customer: `{customer_email}`\n"
+               f"💵 Amount: ৳{amount}\n{txn_line}🆔 Order #{order_id}\n\n"
+               f"Stock আছে + টাকা পেলে Approve করো।")
         keyboard = [[
-            InlineKeyboardButton("✅ Approve করব",  callback_data=f"rapprove_{order_id}"),
-            InlineKeyboardButton("❌ Reject করব",   callback_data=f"rreject_{order_id}")
+            InlineKeyboardButton("✅ Approve করব", callback_data=f"rapprove_{order_id}"),
+            InlineKeyboardButton("❌ Reject করব",  callback_data=f"rreject_{order_id}")
         ]]
         await Bot(token=BOT_TOKEN).send_message(
             chat_id=MAIN_CHAT_ID, text=msg,
             reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-        logger.info(f"✅ New order notification sent — #{order_id}")
     except Exception as e:
         logger.error(f"New order notify error #{order_id}: {e}")
 
@@ -628,22 +655,13 @@ async def send_account_delivered_to_reseller(order_id, reseller_code, product, c
             conn.close()
         if rows and rows[0][0]:
             from telegram import Bot
-            keyboard = [[
-                InlineKeyboardButton("✅ Client পেয়েছে!", callback_data=f"res_client_got_{order_id}")
-            ]]
+            keyboard = [[InlineKeyboardButton("✅ Client পেয়েছে!", callback_data=f"res_client_got_{order_id}")]]
             await Bot(token=RESELLER_BOT_TOKEN).send_message(
                 chat_id=rows[0][0],
-                text=(
-                    f"🎉 *Account Delivered!*\n\n"
-                    f"Order #{order_id} — *{product}*\n"
-                    f"📧 Customer Email: `{customer_email}`\n\n"
-                    f"✅ Invitation পাঠানো হয়েছে!\n"
-                    f"Client কে জিজ্ঞেস করো account পেয়েছে কিনা।\n\n"
-                    f"Client confirm করলে নিচের button press করো 👇"
-                ),
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown"
-            )
+                text=(f"🎉 *Account Delivered!*\n\nOrder #{order_id} — *{product}*\n"
+                      f"📧 Customer Email: `{customer_email}`\n\n"
+                      f"✅ Invitation পাঠানো হয়েছে!\nClient confirm করলে button press করো 👇"),
+                reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Account delivered notify error [{reseller_code}]: {e}")
 
@@ -651,17 +669,12 @@ async def send_payment_check_to_admin(order_id, reseller_code, txn_id, payment_m
     try:
         from telegram import Bot
         method_label = "Nagad" if payment_method == "nagad" else "Bkash"
-        msg = (
-            f"💰 *Payment Verification দরকার!*\n\n"
-            f"Reseller: `{reseller_code}`\n"
-            f"Order: #{order_id}\n"
-            f"📲 {method_label} TxnID: `{txn_id}`\n"
-            f"💵 Amount: ৳{amount}\n\n"
-            f"TxnID check করে নিচের button press করো 👇"
-        )
+        msg = (f"💰 *Payment Verification দরকার!*\n\nReseller: `{reseller_code}`\n"
+               f"Order: #{order_id}\n📲 {method_label} TxnID: `{txn_id}`\n"
+               f"💵 Amount: ৳{amount}\n\nTxnID check করে button press করো 👇")
         keyboard = [[
             InlineKeyboardButton("✅ টাকা পেয়েছি — Complete", callback_data=f"rcomplete_{order_id}"),
-            InlineKeyboardButton("❌ TxnID ভুল",               callback_data=f"rwrong_txn_{order_id}")
+            InlineKeyboardButton("❌ TxnID ভুল", callback_data=f"rwrong_txn_{order_id}")
         ]]
         await Bot(token=BOT_TOKEN).send_message(
             chat_id=MAIN_CHAT_ID, text=msg,
@@ -679,14 +692,11 @@ async def send_payment_reminders():
             for order in due_orders:
                 conn = get_db()
                 try:
-                    conn.run(
-                        "UPDATE reseller_bot_orders SET payment_reminder_count=payment_reminder_count+1 "
-                        "WHERE id=:id", id=order["id"])
+                    conn.run("UPDATE reseller_bot_orders SET payment_reminder_count=payment_reminder_count+1 WHERE id=:id",
+                             id=order["id"])
                 finally:
                     conn.close()
-
                 count = order["reminder_count"] + 1
-
                 try:
                     conn3 = get_db()
                     try:
@@ -697,260 +707,103 @@ async def send_payment_reminders():
                         conn3.close()
                     if rr and rr[0][0]:
                         from telegram import Bot as TBot
-                        remind_keyboard = [[
-                            InlineKeyboardButton("💳 Payment করব", callback_data=f"res_pay_order_{order['id']}")
-                        ]]
+                        remind_keyboard = [[InlineKeyboardButton("💳 Payment করব", callback_data=f"res_pay_order_{order['id']}")]]
                         await TBot(token=RESELLER_BOT_TOKEN).send_message(
                             chat_id=rr[0][0],
-                            text=(
-                                f"⏰ *Payment Reminder #{count}*\n\n"
-                                f"Bhai, tomar order #{order['id']} er account already deliver hoye geche!\n"
-                                f"Kintu payment ekhono baaki ache.\n\n"
-                                f"📦 {order['product']}\n"
-                                f"💵 Amount: ৳{order['amount']}\n\n"
-                                f"Joto taratari payment korbe toto valo 👇"
-                            ),
-                            reply_markup=InlineKeyboardMarkup(remind_keyboard),
-                            parse_mode="Markdown"
-                        )
+                            text=(f"⏰ *Payment Reminder #{count}*\n\nOrder #{order['id']} er account deliver hoye geche!\n"
+                                  f"Payment ekhono baaki.\n\n📦 {order['product']}\n💵 ৳{order['amount']}\n\nPayment korbo 👇"),
+                            reply_markup=InlineKeyboardMarkup(remind_keyboard), parse_mode="Markdown")
                 except Exception as e:
-                    logger.error(f"Reseller reminder notify error: {e}")
-
+                    logger.error(f"Reseller reminder error: {e}")
                 try:
                     from telegram import Bot
-                    msg = (
-                        f"⚠️ *Auto Reminder #{count} sent!*\n\n"
-                        f"Reseller: `{order['reseller_code']}`\n"
-                        f"Order #{order['id']} — {order['product']}\n"
-                        f"💵 ৳{order['amount']} — Payment বাকি\n\n"
-                        f"চাইলে manually message পাঠাও 👇"
-                    )
-                    keyboard = [[
-                        InlineKeyboardButton(
-                            "📩 Manual Message পাঠাও",
-                            callback_data=f"rsend_reminder_{order['id']}")
-                    ]]
+                    keyboard = [[InlineKeyboardButton("📩 Manual Message", callback_data=f"rsend_reminder_{order['id']}")]]
                     await Bot(token=BOT_TOKEN).send_message(
-                        chat_id=CHAT_ID, text=msg,
+                        chat_id=CHAT_ID,
+                        text=(f"⚠️ *Auto Reminder #{count}*\n\nReseller: `{order['reseller_code']}`\n"
+                              f"Order #{order['id']} — {order['product']}\n💵 ৳{order['amount']} বাকি"),
                         reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
                 except Exception as e:
-                    logger.error(f"Admin reminder notify error: {e}")
-
+                    logger.error(f"Admin reminder error: {e}")
         except Exception as e:
             logger.error(f"Payment reminder loop error: {e}")
 
 # =================== AI (GPT-4o) ===================
 
 AI_FUNCTIONS = [
-    {
-        "name": "get_recent_orders",
-        "description": "Recent WooCommerce website orders dekhao",
-        "parameters": {"type":"object","properties":{
-            "limit":  {"type":"integer"},
-            "status": {"type":"string"}
-        }}
-    },
-    {
-        "name": "get_last_order",
-        "description": "WooCommerce er sorboshesh ekta order",
-        "parameters": {"type":"object","properties":{}}
-    },
-    {
-        "name": "update_order_status",
-        "description": "WooCommerce order er status change koro",
-        "parameters": {"type":"object","properties":{
-            "order_id":   {"type":"string"},
-            "new_status": {"type":"string"},
-            "use_woo_id": {"type":"boolean"}
-        },"required":["order_id","new_status"]}
-    },
-    {
-        "name": "get_income_summary",
-        "description": "Income summary — days diye filter korte paro",
-        "parameters": {"type":"object","properties":{
-            "days": {"type":"integer"}
-        }}
-    },
-    {
-        "name": "get_combined_today_summary",
-        "description": (
-            "Aajker MOTA HISHAB — website (WooCommerce) + reseller bot duitoi milie. "
-            "'Aaj koyta order ashche', 'aaj er total', 'aaj ki ki hoyeche' — "
-            "ei dharoner jigges hole OBOSSOI ei function call koro."
-        ),
-        "parameters": {"type":"object","properties":{}}
-    },
-    {
-        "name": "get_today_reseller_bot_orders",
-        "description": (
-            "Shudhu reseller bot er aajker orders. "
-            "'Kon reseller aaj order korche', 'reseller theke aaj ki ashche' — ei khhetre use koro."
-        ),
-        "parameters": {"type":"object","properties":{}}
-    },
-    {
-        "name": "get_reseller_summary",
-        "description": (
-            "Specific reseller er summary — manual + bot orders milie. "
-            "Code (RS001) ba naam diye filter koro."
-        ),
-        "parameters": {"type":"object","properties":{
-            "reseller_name": {
-                "type":"string",
-                "description": "Reseller code ba naam (partial match, case-insensitive)"
-            }
-        }}
-    },
-    {
-        "name": "get_all_reseller_summary",
-        "description": (
-            "Sob reseller er summary — 'reseller theke koyta order ashche', "
-            "'sob reseller er hishab dao' — ei khhetre use koro."
-        ),
-        "parameters": {"type":"object","properties":{}}
-    },
-    {
-        "name": "get_payment_due_summary",
-        "description": (
-            "Kon reseller ekhono taka dey nai, koto taka baki ache — "
-            "'due baki', 'payment dey nai', 'taka pawa jache na', "
-            "'RS001 er due ache kina', 'kono reseller er payment baki' — "
-            "ei dharoner jigges hole OBOSSOI ei function call koro."
-        ),
-        "parameters": {"type":"object","properties":{}}
-    },
-    {
-        "name": "search_orders_by_name",
-        "description": "Customer naam diye WooCommerce order khojo",
-        "parameters": {"type":"object","properties":{
-            "name": {"type":"string"}
-        },"required":["name"]}
-    },
-    {
-        "name": "add_income",
-        "description": "Manual income add koro",
-        "parameters": {"type":"object","properties":{
-            "amount": {"type":"number"},
-            "note":   {"type":"string"}
-        },"required":["amount","note"]}
-    },
-    {
-        "name": "save_memory",
-        "description": "Important info, reminder, note save koro",
-        "parameters": {"type":"object","properties":{
-            "key":   {"type":"string"},
-            "value": {"type":"string"}
-        },"required":["key","value"]}
-    },
-    {
-        "name": "get_all_memories",
-        "description": "Sob saved notes/reminders/info dekhao",
-        "parameters": {"type":"object","properties":{}}
-    },
+    {"name":"get_recent_orders","description":"Recent WooCommerce orders","parameters":{"type":"object","properties":{"limit":{"type":"integer"},"status":{"type":"string"}}}},
+    {"name":"get_last_order","description":"WooCommerce er sorboshesh order","parameters":{"type":"object","properties":{}}},
+    {"name":"update_order_status","description":"WooCommerce order status change","parameters":{"type":"object","properties":{"order_id":{"type":"string"},"new_status":{"type":"string"},"use_woo_id":{"type":"boolean"}},"required":["order_id","new_status"]}},
+    {"name":"get_income_summary","description":"Income summary","parameters":{"type":"object","properties":{"days":{"type":"integer"}}}},
+    {"name":"get_combined_today_summary","description":"Aajker MOTA HISHAB — website + reseller bot","parameters":{"type":"object","properties":{}}},
+    {"name":"get_today_reseller_bot_orders","description":"Shudhu reseller bot er aajker orders","parameters":{"type":"object","properties":{}}},
+    {"name":"get_reseller_summary","description":"Specific reseller er summary","parameters":{"type":"object","properties":{"reseller_name":{"type":"string"}}}},
+    {"name":"get_all_reseller_summary","description":"Sob reseller er summary","parameters":{"type":"object","properties":{}}},
+    {"name":"get_payment_due_summary","description":"Kon reseller taka dey nai","parameters":{"type":"object","properties":{}}},
+    {"name":"search_orders_by_name","description":"Customer naam diye order khojo","parameters":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}},
+    {"name":"add_income","description":"Manual income add","parameters":{"type":"object","properties":{"amount":{"type":"number"},"note":{"type":"string"}},"required":["amount","note"]}},
+    {"name":"save_memory","description":"Important info save","parameters":{"type":"object","properties":{"key":{"type":"string"},"value":{"type":"string"}},"required":["key","value"]}},
+    {"name":"get_all_memories","description":"Sob saved notes","parameters":{"type":"object","properties":{}}},
 ]
 
 def execute_function(name, args):
     try:
-        if name == "get_recent_orders":
-            return db_get_recent_orders(args.get("limit", 5), args.get("status"))
-        elif name == "get_last_order":
-            return db_get_last_order()
+        if name == "get_recent_orders": return db_get_recent_orders(args.get("limit",5),args.get("status"))
+        elif name == "get_last_order": return db_get_last_order()
         elif name == "update_order_status":
-            ok, r = db_update_order_status(args["order_id"], args["new_status"], use_woo_id=True)
-            if not ok:
-                ok, r = db_update_order_status(args["order_id"], args["new_status"], use_woo_id=False)
-            return {"success": ok, "result": r}
-        elif name == "get_income_summary":
-            return db_get_income_summary(args.get("days", 1))
-        elif name == "get_combined_today_summary":
-            return db_get_combined_today_summary()
-        elif name == "get_today_reseller_bot_orders":
-            return db_get_today_reseller_bot_orders()
-        elif name == "get_reseller_summary":
-            return db_get_reseller_summary(args.get("reseller_name"))
-        elif name == "get_all_reseller_summary":
-            return db_get_reseller_summary()
-        elif name == "get_payment_due_summary":
-            return db_get_payment_due_summary()
-        elif name == "search_orders_by_name":
-            return db_search_orders_by_name(args["name"])
-        elif name == "add_income":
-            return {"success": db_add_income(args["amount"], args["note"])}
+            ok,r = db_update_order_status(args["order_id"],args["new_status"],use_woo_id=True)
+            if not ok: ok,r = db_update_order_status(args["order_id"],args["new_status"],use_woo_id=False)
+            return {"success":ok,"result":r}
+        elif name == "get_income_summary": return db_get_income_summary(args.get("days",1))
+        elif name == "get_combined_today_summary": return db_get_combined_today_summary()
+        elif name == "get_today_reseller_bot_orders": return db_get_today_reseller_bot_orders()
+        elif name == "get_reseller_summary": return db_get_reseller_summary(args.get("reseller_name"))
+        elif name == "get_all_reseller_summary": return db_get_reseller_summary()
+        elif name == "get_payment_due_summary": return db_get_payment_due_summary()
+        elif name == "search_orders_by_name": return db_search_orders_by_name(args["name"])
+        elif name == "add_income": return {"success":db_add_income(args["amount"],args["note"])}
         elif name == "save_memory":
-            memory_save(args["key"], args["value"])
-            return {"success": True, "saved": args["key"]}
-        elif name == "get_all_memories":
-            return memory_get_all()
+            memory_save(args["key"],args["value"])
+            return {"success":True,"saved":args["key"]}
+        elif name == "get_all_memories": return memory_get_all()
     except Exception as e:
-        return {"error": str(e)}
+        return {"error":str(e)}
 
 def build_system_prompt():
     memories = memory_get_all()
     mem_text = ""
     if memories:
-        mem_text = "\n\nTomar saved notes/reminders:\n"
+        mem_text = "\n\nTomar saved notes:\n"
         for m in memories[:10]:
             mem_text += f"- {m['key']}: {m['value']}\n"
-
-    return f"""Tumi Favourite Deals er personal business assistant. Tomar naam "FD Assistant".
-
-Tumi shuddho Banglish e kotha bolbe — Bangla mane kintu English harf.
-Chhoto chhoto sentence. Casual, friendly. Jemon:
-"Bhai, aaj 3ta order ashche — 2ta website theke, 1ta reseller er."
-
-Sob takar hishab e OBOSSOI ৳ (BDT) sign use korbe. Jemon: ৳199, ৳850.
-
-Business flow:
-1. Reseller order dey (product + customer email)
-2. Tumi (admin) approve/reject koro
-3. Approve korle invitation pathao → reseller er client accept kore
-4. Client confirm korle reseller "Client peyeche" button press kore
-5. Tokhn payment_due shuru hoy — reseller taka dey
-6. Tumi verify kore complete koro
-
-Khaas rules:
-- "aaj koyta order", "aaj er summary" → get_combined_today_summary
-- "reseller theke aaj ki" → get_today_reseller_bot_orders
-- "sob reseller er hishab" → get_all_reseller_summary
-- Specific reseller → get_reseller_summary (code/naam diye)
-- "due baki", "payment dey nai", "taka pawa jacche na", "RS001 er due ache kina", "kono reseller baki ache" → get_payment_due_summary
-- Sob takar response e ৳ sign use korbe
-- Spelling thik rakho — bangla shobdo English harf e lekho
+    return f"""Tumi Favourite Deals er personal business assistant. Naam "FD Assistant".
+Banglish e kotha bolbe. Chhoto sentence. Casual, friendly.
+Sob takar hishab e ৳ sign use korbe.
 {mem_text}"""
 
 async def process_ai_message(messages_history):
-    if not OPENAI_KEY:
-        return None
-    messages = [{"role": "system", "content": build_system_prompt()}] + messages_history
+    if not OPENAI_KEY: return None
+    messages = [{"role":"system","content":build_system_prompt()}] + messages_history
     try:
         resp = req.post(
             "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
-            json={"model": "gpt-4o", "messages": messages,
-                  "functions": AI_FUNCTIONS, "function_call": "auto", "max_tokens": 1000},
-            timeout=20
-        ).json()
-
-        if "error" in resp:
-            logger.error(f"OpenAI error: {resp['error']}")
-            return None
-
+            headers={"Authorization":f"Bearer {OPENAI_KEY}","Content-Type":"application/json"},
+            json={"model":"gpt-4o","messages":messages,"functions":AI_FUNCTIONS,"function_call":"auto","max_tokens":1000},
+            timeout=20).json()
+        if "error" in resp: return None
         msg = resp["choices"][0]["message"]
         if msg.get("function_call"):
-            fn     = msg["function_call"]["name"]
-            args   = json.loads(msg["function_call"]["arguments"])
+            fn   = msg["function_call"]["name"]
+            args = json.loads(msg["function_call"]["arguments"])
             result = execute_function(fn, args)
             messages.append(msg)
-            messages.append({"role": "function", "name": fn,
-                              "content": json.dumps(result, ensure_ascii=False)})
+            messages.append({"role":"function","name":fn,"content":json.dumps(result,ensure_ascii=False)})
             resp2 = req.post(
                 "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
-                json={"model": "gpt-4o", "messages": messages, "max_tokens": 600},
-                timeout=20
-            ).json()
-            if "error" in resp2:
-                return None
+                headers={"Authorization":f"Bearer {OPENAI_KEY}","Content-Type":"application/json"},
+                json={"model":"gpt-4o","messages":messages,"max_tokens":600},
+                timeout=20).json()
+            if "error" in resp2: return None
             return resp2["choices"][0]["message"]["content"]
         return msg.get("content")
     except Exception as e:
@@ -971,7 +824,6 @@ def main_menu_keyboard():
          InlineKeyboardButton("⏳ Pending Orders",           callback_data="pending_orders")],
         [InlineKeyboardButton("🛍️ Reseller Bot Orders আজ",  callback_data="reseller_bot_orders_today")],
         [InlineKeyboardButton("💸 Due বাকি (Reseller)",     callback_data="due_baki")],
-        # ✅ নতুন Subscription buttons
         [InlineKeyboardButton("📋 Subscription Check",      callback_data="sub_check"),
          InlineKeyboardButton("➕ নতুন Subscription",       callback_data="sub_new")],
     ])
@@ -984,8 +836,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🛍️ *Favourite Deals Assistant*\n\nAssalamualaikum bhai! "
         "Ami tomar business assistant. Menu theke kaj koro othoba seedha bolo! 🤖",
-        reply_markup=main_menu_keyboard(), parse_mode="Markdown"
-    )
+        reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text    = update.message.text.strip()
@@ -1002,17 +853,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                          r=text, id=order_id)
             finally:
                 conn.close()
-            await notify_reseller(
-                order["reseller_code"],
-                f"❌ *Order #{order_id} Reject হয়েছে*\n\n"
-                f"📦 {order['product']}\n"
-                f"কারণ: {text}\n\n"
-                f"Admin এর সাথে যোগাযোগ করো।"
-            )
-            await update.message.reply_text(
-                f"❌ Order #{order_id} reject করা হয়েছে। Reseller কে কারণ জানানো হয়েছে।",
-                reply_markup=main_menu_keyboard()
-            )
+            await notify_reseller(order["reseller_code"],
+                f"❌ *Order #{order_id} Reject*\n\n📦 {order['product']}\nকারণ: {text}")
+            await update.message.reply_text(f"❌ Order #{order_id} reject।", reply_markup=main_menu_keyboard())
         context.user_data["state"] = None
         return
 
@@ -1020,31 +863,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_id = context.user_data.get("reminder_order_id")
         order    = get_reseller_bot_order(order_id)
         if order:
-            await notify_reseller(
-                order["reseller_code"],
-                f"📩 *Admin Message — Order #{order_id}*\n\n{text}"
-            )
-            await update.message.reply_text(
-                f"✅ Message পাঠানো হয়েছে reseller কে।",
-                reply_markup=main_menu_keyboard()
-            )
+            await notify_reseller(order["reseller_code"], f"📩 *Admin Message — Order #{order_id}*\n\n{text}")
+            await update.message.reply_text("✅ Message পাঠানো হয়েছে।", reply_markup=main_menu_keyboard())
         context.user_data["state"] = None
         return
 
     if chat_id not in user_conversations:
         user_conversations[chat_id] = []
-    user_conversations[chat_id].append({"role": "user", "content": text})
+    user_conversations[chat_id].append({"role":"user","content":text})
     if len(user_conversations[chat_id]) > 15:
         user_conversations[chat_id] = user_conversations[chat_id][-15:]
 
     ai_reply = await process_ai_message(user_conversations[chat_id])
     if ai_reply:
-        user_conversations[chat_id].append({"role": "assistant", "content": ai_reply})
+        user_conversations[chat_id].append({"role":"assistant","content":ai_reply})
         await update.message.reply_text(
             ai_reply,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-            parse_mode="Markdown"
-        )
+            parse_mode="Markdown")
     else:
         await update.message.reply_text("Menu theke kaj koro bhai:", reply_markup=main_menu_keyboard())
 
@@ -1054,31 +890,79 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data  = query.data
 
     # ══════════════════════════════════════════
-    # ✅ নতুন — Subscription buttons
+    # ✅ Subscription — Check
     # ══════════════════════════════════════════
 
     if data == "sub_check":
         await query.edit_message_text(
-            "📋 *Subscription Check*\n\n"
-            "Client এর email দাও:\n`/sub email@gmail.com`\n\n"
-            "Example: `/sub john@gmail.com`",
+            "📋 *Subscription Check*\n\nClient এর email দাও:\n`/sub email@gmail.com`",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-            parse_mode="Markdown"
-        )
+            parse_mode="Markdown")
         return
+
+    # ══════════════════════════════════════════
+    # ✅ Subscription — নতুন Create (Dynamic)
+    # ══════════════════════════════════════════
 
     elif data == "sub_new":
         await query.edit_message_text(
-            "➕ *নতুন Subscription Create*\n\n"
-            "Format:\n`/newsub email phone password`\n\n"
+            "➕ *নতুন Subscription Create*\n\nFormat:\n`/newsub email phone password`\n\n"
             "Example:\n`/newsub john@gmail.com 01712345678 Pass@123`",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-            parse_mode="Markdown"
-        )
+            parse_mode="Markdown")
         return
 
-    elif data.startswith("newsub_product_"):
-        # Product select করার পর subscription create
+    # ══════════════════════════════════════════
+    # ✅ Product select (dynamic from WooCommerce)
+    # ══════════════════════════════════════════
+
+    elif data.startswith("newsub_prod_"):
+        product_id = int(data.split("_")[2])
+        await query.edit_message_text(f"⏳ Product #{product_id} এর plans fetch করছি...")
+        variations = fetch_product_variations(product_id)
+        if not variations:
+            await query.edit_message_text(
+                "❌ Plans পাওয়া যায়নি। পরে try করো।",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
+            return
+        context.user_data["newsub_product_id"] = product_id
+        keyboard = []
+        for var in variations:
+            label = f"{var['name']} — ৳{var['price']}"
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"newsub_var_{product_id}_{var['id']}")])
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="newsub_back")])
+        await query.edit_message_text(
+            "📦 *Plan select করো:*",
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        return
+
+    elif data == "newsub_back":
+        # Products list আবার দেখাও
+        await query.edit_message_text("⏳ Products fetch করছি...")
+        products = fetch_subscription_products()
+        if not products:
+            await query.edit_message_text(
+                "❌ Products পাওয়া যায়নি।",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
+            return
+        keyboard = []
+        for p in products:
+            keyboard.append([InlineKeyboardButton(f"📦 {p['name']}", callback_data=f"newsub_prod_{p['id']}")])
+        keyboard.append([InlineKeyboardButton("🏠 Menu", callback_data="menu")])
+        await query.edit_message_text(
+            "🛍️ *কোন product এর subscription create করবে?*",
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        return
+
+    # ══════════════════════════════════════════
+    # ✅ Variation select → Order create
+    # ══════════════════════════════════════════
+
+    elif data.startswith("newsub_var_"):
+        parts      = data.split("_")
+        product_id = int(parts[2])
+        var_id     = int(parts[3])
+
         email    = context.user_data.get("newsub_email")
         phone    = context.user_data.get("newsub_phone")
         password = context.user_data.get("newsub_password")
@@ -1086,105 +970,96 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not email:
             await query.edit_message_text(
                 "❌ Session শেষ। আবার `/newsub email phone password` দাও।",
-                parse_mode="Markdown"
-            )
+                parse_mode="Markdown")
             return
 
-        PRODUCT_MAP = {
-            "newsub_product_chatgpt": CHATGPT_PRODUCT_ID,
-            "newsub_product_gemini":  GEMINI_PRODUCT_ID,
-        }
-        product_id = PRODUCT_MAP.get(data, 0)
+        await query.edit_message_text(f"⏳ `{email}` এর জন্য order create করছি...")
 
-        if product_id == 0:
-            await query.edit_message_text(
-                "❌ Product ID set নেই!\n\n"
-                "Railway Variables এ add করো:\n"
-                "`CHATGPT_PRODUCT_ID` = ChatGPT product ID\n"
-                "`GEMINI_PRODUCT_ID` = Gemini product ID\n\n"
-                "_(WooCommerce → Products → Product URL এ ID দেখবে)_",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-                parse_mode="Markdown"
-            )
+        # Variation info নাও
+        variations = fetch_product_variations(product_id)
+        selected_var = next((v for v in variations if v["id"] == var_id), None)
+
+        if not selected_var:
+            await query.edit_message_text("❌ Variation পাওয়া যায়নি।",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
             return
 
-        await query.edit_message_text(f"⏳ `{email}` এর জন্য subscription create করছি...")
+        # Attribute prepare করো
+        variation_attributes = {}
+        if selected_var.get("attribute_slug") and selected_var.get("attribute_option"):
+            variation_attributes[selected_var["attribute_slug"]] = selected_var["attribute_option"]
 
-        order, error = create_new_customer_and_subscription(email, phone, password, product_id)
+        order, error = create_order_with_variation(
+            email, phone, password, product_id, var_id, variation_attributes)
 
+        # Context clear
         context.user_data.pop("newsub_email", None)
         context.user_data.pop("newsub_phone", None)
         context.user_data.pop("newsub_password", None)
+        context.user_data.pop("newsub_product_id", None)
 
         if error:
             await query.edit_message_text(
                 f"❌ Error: {error}\n\nEmail already registered থাকলে সরাসরি WooCommerce dashboard এ করো।",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-                parse_mode="Markdown"
-            )
+                parse_mode="Markdown")
             return
 
-        order_id = order["id"]
-        pay_link = generate_payment_link(order_id)
+        order_id  = order["id"]
+        order_key = order.get("order_key", "")
+        pay_link  = generate_payment_link(order_id, order_key)
 
         await query.edit_message_text(
-            f"✅ *নতুন Client Create হয়েছে!*\n\n"
+            f"✅ *নতুন Client + Order Create হয়েছে!*\n\n"
             f"📧 Email: `{email}`\n"
             f"📱 Phone: `{phone}`\n"
-            f"🔑 Password: `{password}`\n\n"
-            f"📋 Order #{order_id} create হয়েছে।\n\n"
-            f"👇 Payment link (client কে পাঠাও):\n"
-            f"`{pay_link}`\n\n"
-            f"অথবা manually deliver করলে `/sub {email}` দিয়ে activate করো।",
+            f"🔑 Password: `{password}`\n"
+            f"📦 Plan: {selected_var['name']}\n"
+            f"💵 Amount: ৳{selected_var['price']}\n\n"
+            f"📋 Order #{order_id}\n\n"
+            f"👇 Payment link (client কে পাঠাও):\n`{pay_link}`\n\n"
+            f"Client pay করলে subscription auto active হবে।",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-            parse_mode="Markdown"
-        )
+            parse_mode="Markdown")
         return
+
+    # ══════════════════════════════════════════
+    # ✅ Subscription Renew/Cancel buttons
+    # ══════════════════════════════════════════
 
     elif data.startswith("sub_renew_"):
         sub_id = int(data.split("_")[2])
         keyboard = [
-            [InlineKeyboardButton("🔗 Payment Link Generate করো", callback_data=f"sub_link_{sub_id}")],
-            [InlineKeyboardButton("✅ Manually Renew করলাম",      callback_data=f"sub_manual_{sub_id}")],
-            [InlineKeyboardButton("🔙 Back",                       callback_data="menu")]
+            [InlineKeyboardButton("🔗 Payment Link Generate", callback_data=f"sub_link_{sub_id}")],
+            [InlineKeyboardButton("✅ Manually Renew করলাম",  callback_data=f"sub_manual_{sub_id}")],
+            [InlineKeyboardButton("🔙 Back",                   callback_data="menu")]
         ]
         await query.edit_message_text(
             f"🔄 *Subscription #{sub_id} Renew*\n\nকীভাবে renew করবে?",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         return
 
     elif data.startswith("sub_link_"):
         sub_id = int(data.split("_")[2])
-        await query.edit_message_text(f"⏳ Payment link generate করছি...")
-
+        await query.edit_message_text("⏳ Payment link generate করছি...")
         renewal = create_renewal_order(sub_id)
-
         if renewal and "id" in renewal:
-            order_id = renewal["id"]
-            pay_link = generate_payment_link(order_id)
+            order_id  = renewal["id"]
+            order_key = renewal.get("order_key", "")
+            pay_link  = generate_payment_link(order_id, order_key)
             await query.edit_message_text(
-                f"✅ *Payment Link Ready!*\n\n"
-                f"Subscription #{sub_id} | Order #{order_id}\n\n"
-                f"👇 Client কে এই link পাঠাও:\n\n"
-                f"`{pay_link}`\n\n"
-                f"Client pay করলে bot এ notify আসবে। ✅",
+                f"✅ *Payment Link Ready!*\n\nSubscription #{sub_id} | Order #{order_id}\n\n"
+                f"👇 Client কে পাঠাও:\n`{pay_link}`",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-                parse_mode="Markdown"
-            )
+                parse_mode="Markdown")
         else:
             pay_link = f"{WP_URL}/my-account/view-subscription/{sub_id}/"
             await query.edit_message_text(
-                f"⚠️ *Auto link হয়নি।*\n\n"
-                f"Client কে এই link পাঠাও:\n`{pay_link}`\n\n"
-                f"অথবা 'Manually Renew' করো।",
+                f"⚠️ Auto link হয়নি।\n\nClient কে পাঠাও:\n`{pay_link}`",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Manually Renew করলাম", callback_data=f"sub_manual_{sub_id}")],
+                    [InlineKeyboardButton("✅ Manually Renew", callback_data=f"sub_manual_{sub_id}")],
                     [InlineKeyboardButton("🏠 Menu", callback_data="menu")]
-                ]),
-                parse_mode="Markdown"
-            )
+                ]), parse_mode="Markdown")
         return
 
     elif data.startswith("sub_manual_"):
@@ -1192,16 +1067,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = wc_put(f"subscriptions/{sub_id}", {"status": "active"})
         if result and result.get("status") == "active":
             await query.edit_message_text(
-                f"✅ *Subscription #{sub_id} Active করা হয়েছে!*\n\nClient এর access চালু।",
+                f"✅ *Subscription #{sub_id} Active!*",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-                parse_mode="Markdown"
-            )
+                parse_mode="Markdown")
         else:
             await query.edit_message_text(
-                f"❌ Activate করা যায়নি। WooCommerce dashboard এ manually করো।",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-                parse_mode="Markdown"
-            )
+                "❌ Activate হয়নি। WooCommerce dashboard এ manually করো।",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
         return
 
     elif data.startswith("sub_cancel_confirm_"):
@@ -1209,31 +1081,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = wc_put(f"subscriptions/{sub_id}", {"status": "cancelled"})
         if result and result.get("status") == "cancelled":
             await query.edit_message_text(
-                f"✅ *Subscription #{sub_id} Cancel করা হয়েছে!*",
+                f"✅ *Subscription #{sub_id} Cancel হয়েছে!*",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-                parse_mode="Markdown"
-            )
+                parse_mode="Markdown")
         else:
             await query.edit_message_text(
-                f"❌ Cancel করা যায়নি। WooCommerce dashboard এ manually করো।",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-                parse_mode="Markdown"
-            )
+                "❌ Cancel হয়নি। WooCommerce dashboard এ manually করো.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
         return
 
     elif data.startswith("sub_cancel_"):
         sub_id = int(data.split("_")[2])
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ হ্যাঁ Cancel করো", callback_data=f"sub_cancel_confirm_{sub_id}"),
-                InlineKeyboardButton("❌ না, Back",          callback_data="menu")
-            ]
-        ]
+        keyboard = [[
+            InlineKeyboardButton("✅ হ্যাঁ Cancel করো", callback_data=f"sub_cancel_confirm_{sub_id}"),
+            InlineKeyboardButton("❌ না, Back",          callback_data="menu")
+        ]]
         await query.edit_message_text(
-            f"⚠️ *Subscription #{sub_id} Cancel করবে?*\n\nClient এর access বন্ধ হয়ে যাবে!",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
+            f"⚠️ *Subscription #{sub_id} Cancel করবে?*\n\nClient এর access বন্ধ হবে!",
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         return
 
     # ══════════════════════════════════════════
@@ -1246,31 +1111,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if order:
             conn = get_db()
             try:
-                conn.run(
-                    "UPDATE reseller_bot_orders SET status='account_delivered', "
-                    "account_delivered_at=NOW() WHERE id=:id", id=order_id)
+                conn.run("UPDATE reseller_bot_orders SET status='account_delivered', account_delivered_at=NOW() WHERE id=:id",
+                         id=order_id)
             finally:
                 conn.close()
             await send_account_delivered_to_reseller(
-                order_id, order["reseller_code"],
-                order["product"], order["customer_email"], order["amount"]
-            )
+                order_id, order["reseller_code"], order["product"], order["customer_email"], order["amount"])
             await query.edit_message_text(
-                f"✅ *Order #{order_id} Approved!*\n\n"
-                f"📧 {order['customer_email']} এ invitation পাঠাও।\n"
-                f"Reseller কে জানানো হয়েছে — client confirm করলে payment শুরু হবে।",
+                f"✅ *Order #{order_id} Approved!*\n\n📧 {order['customer_email']} এ invitation পাঠাও।",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-                parse_mode="Markdown"
-            )
+                parse_mode="Markdown")
         return
 
     elif data.startswith("rreject_"):
         order_id = int(data.split("_")[1])
         context.user_data["rejecting_order_id"] = order_id
         context.user_data["state"]               = "waiting_reject_reason"
-        await query.edit_message_text(
-            f"❌ Order #{order_id} reject এর কারণ লেখো\n(reseller কে পাঠানো হবে):"
-        )
+        await query.edit_message_text(f"❌ Order #{order_id} reject এর কারণ লেখো:")
         return
 
     elif data.startswith("rcomplete_"):
@@ -1279,30 +1136,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if order:
             conn = get_db()
             try:
-                conn.run(
-                    "UPDATE reseller_bot_orders SET status='completed', completed_at=NOW() WHERE id=:id",
-                    id=order_id)
-                conn.run(
-                    "INSERT INTO income (amount,note,type) VALUES (:a,:n,'reseller')",
-                    a=float(order["amount"]),
-                    n=f"Reseller #{order_id} — {order['product']} ({order['reseller_code']})")
+                conn.run("UPDATE reseller_bot_orders SET status='completed', completed_at=NOW() WHERE id=:id", id=order_id)
+                conn.run("INSERT INTO income (amount,note,type) VALUES (:a,:n,'reseller')",
+                         a=float(order["amount"]),
+                         n=f"Reseller #{order_id} — {order['product']} ({order['reseller_code']})")
             finally:
                 conn.close()
-            await notify_reseller(
-                order["reseller_code"],
-                f"🎉 *Order #{order_id} সম্পন্ন!*\n\n"
-                f"টাকা পেয়েছি। Order complete!\n\n"
-                f"📦 {order['product']}\n"
-                f"💵 ৳{order['amount']}\n\n"
-                f"ধন্যবাদ! পরের order এর জন্য অপেক্ষায় আছি। 🙏"
-            )
+            await notify_reseller(order["reseller_code"],
+                f"🎉 *Order #{order_id} সম্পন্ন!*\n\n📦 {order['product']}\n💵 ৳{order['amount']}\n\nধন্যবাদ!")
             await query.edit_message_text(
-                f"✅ *Order #{order_id} Complete!*\n"
-                f"💵 ৳{order['amount']} income এ যোগ হয়েছে।\n"
-                f"Reseller কে জানানো হয়েছে।",
+                f"✅ *Order #{order_id} Complete!*\n💵 ৳{order['amount']} income এ যোগ।",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-                parse_mode="Markdown"
-            )
+                parse_mode="Markdown")
         return
 
     elif data.startswith("rwrong_txn_"):
@@ -1311,22 +1156,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if order:
             conn = get_db()
             try:
-                conn.run(
-                    "UPDATE reseller_bot_orders SET transaction_id=NULL WHERE id=:id",
-                    id=order_id)
+                conn.run("UPDATE reseller_bot_orders SET transaction_id=NULL WHERE id=:id", id=order_id)
             finally:
                 conn.close()
-            await notify_reseller(
-                order["reseller_code"],
-                f"❌ *Order #{order_id} — TxnID ভুল!*\n\n"
-                f"Admin verify করতে পারেনি। সঠিক TxnID দাও।\n"
-                f"'Amar Orders' → '💳 Payment Korbo' button press koro!"
-            )
+            await notify_reseller(order["reseller_code"],
+                f"❌ *Order #{order_id} — TxnID ভুল!*\n\nSothik TxnID dao।")
             await query.edit_message_text(
-                f"❌ Order #{order_id} এর TxnID ভুল বলা হয়েছে। Reseller কে জানানো হয়েছে।",
+                f"❌ Order #{order_id} TxnID ভুল। Reseller কে জানানো হয়েছে।",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-                parse_mode="Markdown"
-            )
+                parse_mode="Markdown")
         return
 
     elif data.startswith("rsend_reminder_"):
@@ -1335,20 +1173,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["state"]              = "waiting_manual_reminder"
         order = get_reseller_bot_order(order_id)
         await query.edit_message_text(
-            f"📩 Order #{order_id} ({order['reseller_code']}) কে কী message পাঠাবে?\n\n"
-            f"Type করো (reseller bot এ সরাসরি যাবে):"
-        )
+            f"📩 Order #{order_id} ({order['reseller_code']}) কে কী message পাঠাবে?")
         return
 
     # ── Menu navigation ──
-    if   data == "today_orders":               await show_orders(query, days=1)
-    elif data == "week_orders":                await show_orders(query, days=7)
-    elif data == "today_income":               await show_income(query, days=1)
-    elif data == "month_report":               await show_month_report(query)
-    elif data == "resellers":                  await show_resellers(query)
-    elif data == "pending_orders":             await show_orders_by_status(query, "pending")
-    elif data == "reseller_bot_orders_today":  await show_reseller_bot_orders_today(query)
-    elif data == "due_baki":                   await show_due_baki(query)
+    if   data == "today_orders":              await show_orders(query, days=1)
+    elif data == "week_orders":               await show_orders(query, days=7)
+    elif data == "today_income":              await show_income(query, days=1)
+    elif data == "month_report":              await show_month_report(query)
+    elif data == "resellers":                 await show_resellers(query)
+    elif data == "pending_orders":            await show_orders_by_status(query, "pending")
+    elif data == "reseller_bot_orders_today": await show_reseller_bot_orders_today(query)
+    elif data == "due_baki":                  await show_due_baki(query)
     elif data == "manual_income":
         await query.edit_message_text("💰 Format: `/income 500 bkash e paisi`", parse_mode="Markdown")
     elif data == "search_customer":
@@ -1357,8 +1193,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "🛍️ *FD Assistant*\n\nMenu theke kaj koro ba seedha bolo:",
             reply_markup=main_menu_keyboard(), parse_mode="Markdown")
-    elif data.startswith("status_"):
-        await show_status_options(query, data.split("_")[1])
+    elif data.startswith("status_"):   await show_status_options(query, data.split("_")[1])
     elif data.startswith("setstatus_"):
         parts = data.split("_")
         await update_order_status_btn(query, parts[1], parts[2])
@@ -1367,48 +1202,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = get_db()
         try:
             orders = conn.run(
-                "SELECT id, product, amount FROM reseller_bot_orders "
-                "WHERE reseller_code=:c AND status='payment_due'",
+                "SELECT id, product, amount FROM reseller_bot_orders WHERE reseller_code=:c AND status='payment_due'",
                 c=reseller_code)
         finally:
             conn.close()
         if not orders:
-            await query.edit_message_text(
-                f"✅ {reseller_code} এর কোনো due order নেই।",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Due List", callback_data="due_baki")]])); return
+            await query.edit_message_text(f"✅ {reseller_code} এর কোনো due নেই।",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="due_baki")]])); return
         count = 0
         for o in orders:
-            order_id, product, amount = o[0], o[1], o[2]
             try:
-                from telegram import Bot
-                pay_keyboard = [[
-                    InlineKeyboardButton("💳 Payment করব", callback_data=f"res_pay_order_{order_id}")
-                ]]
                 conn2 = get_db()
                 try:
-                    rr = conn2.run(
-                        "SELECT telegram_chat_id FROM resellers WHERE UPPER(reseller_code)=UPPER(:c)",
-                        c=reseller_code)
+                    rr = conn2.run("SELECT telegram_chat_id FROM resellers WHERE UPPER(reseller_code)=UPPER(:c)", c=reseller_code)
                 finally:
                     conn2.close()
                 if rr and rr[0][0]:
+                    from telegram import Bot
+                    pay_keyboard = [[InlineKeyboardButton("💳 Payment করব", callback_data=f"res_pay_order_{o[0]}")]]
                     await Bot(token=RESELLER_BOT_TOKEN).send_message(
                         chat_id=rr[0][0],
-                        text=(
-                            f"⏰ *Admin Reminder!*\n\n"
-                            f"Order #{order_id} — {product}\n"
-                            f"💵 ৳{amount} payment বাকি আছে!\n\n"
-                            f"এখনই payment করো 👇"
-                        ),
-                        reply_markup=InlineKeyboardMarkup(pay_keyboard),
-                        parse_mode="Markdown"
-                    )
+                        text=(f"⏰ *Admin Reminder!*\n\nOrder #{o[0]} — {o[1]}\n💵 ৳{o[2]} বাকি!\n\nPayment করো 👇"),
+                        reply_markup=InlineKeyboardMarkup(pay_keyboard), parse_mode="Markdown")
                     count += 1
             except Exception as e:
-                logger.error(f"Remind reseller error: {e}")
-        await query.edit_message_text(
-            f"✅ *{reseller_code} কে {count}টা reminder পাঠানো হয়েছে!*",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Due List", callback_data="due_baki")]]),
+                logger.error(f"Remind error: {e}")
+        await query.edit_message_text(f"✅ *{reseller_code} কে {count}টা reminder পাঠানো হয়েছে!*",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="due_baki")]]),
             parse_mode="Markdown")
 
     elif data.startswith("confirm_remove_reseller_"):
@@ -1428,55 +1248,37 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finally:
             conn.close()
         await query.edit_message_text(
-            f"🗑️ *Reseller বাদ দেওয়া হয়েছে!*\n\n"
-            f"👤 {name} | 📞 {phone} | 🔑 `{code}`\n\n"
-            f"_(এই reseller আর bot এ login করতে পারবে না।)_",
+            f"🗑️ *Reseller বাদ দেওয়া হয়েছে!*\n\n👤 {name} | 📞 {phone} | 🔑 `{code}`",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
             parse_mode="Markdown")
 
 # ── Display helpers ──
 
-STATUS_EMOJI = {
-    STATUS_PENDING:           "🕐",
-    STATUS_ACCOUNT_DELIVERED: "📦",
-    STATUS_PAYMENT_DUE:       "💰",
-    STATUS_COMPLETED:         "✅",
-    STATUS_REJECTED:          "❌",
-}
-STATUS_LABEL = {
-    STATUS_PENDING:           "Pending",
-    STATUS_ACCOUNT_DELIVERED: "Account Delivered",
-    STATUS_PAYMENT_DUE:       "Payment Due",
-    STATUS_COMPLETED:         "Completed",
-    STATUS_REJECTED:          "Rejected",
-}
+STATUS_EMOJI = {STATUS_PENDING:"🕐",STATUS_ACCOUNT_DELIVERED:"📦",STATUS_PAYMENT_DUE:"💰",STATUS_COMPLETED:"✅",STATUS_REJECTED:"❌"}
+STATUS_LABEL = {STATUS_PENDING:"Pending",STATUS_ACCOUNT_DELIVERED:"Account Delivered",STATUS_PAYMENT_DUE:"Payment Due",STATUS_COMPLETED:"Completed",STATUS_REJECTED:"Rejected"}
 
 async def show_orders(query, days=1):
     since = datetime.now() - timedelta(days=days)
     conn  = get_db()
     try:
-        rows = conn.run(
-            "SELECT id,woo_order_id,customer_name,total,status "
-            "FROM orders WHERE created_at>=:s ORDER BY created_at DESC", s=since)
+        rows = conn.run("SELECT id,woo_order_id,customer_name,total,status FROM orders WHERE created_at>=:s ORDER BY created_at DESC", s=since)
     finally:
         conn.close()
     if not rows:
-        await query.edit_message_text("📦 Kono order nei bhai.",
+        await query.edit_message_text("📦 Kono order nei.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]])); return
-    text = f"📦 *Last {days} diner WooCommerce orders ({len(rows)}ta):*\n\n"
+    text = f"📦 *Last {days} diner orders ({len(rows)}ta):*\n\n"
     keyboard = []
     for o in rows[:10]:
         text += f"🔸 #{o[1]} — {o[2]}\n   💵 ৳{o[3]} | {o[4]}\n\n"
-        keyboard.append([InlineKeyboardButton(f"✏️ #{o[1]} status change", callback_data=f"status_{o[0]}")])
+        keyboard.append([InlineKeyboardButton(f"✏️ #{o[1]} status", callback_data=f"status_{o[0]}")])
     keyboard.append([InlineKeyboardButton("🔙 Menu", callback_data="menu")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def show_orders_by_status(query, status):
     conn = get_db()
     try:
-        rows = conn.run(
-            "SELECT id,woo_order_id,customer_name,total,status "
-            "FROM orders WHERE status=:s ORDER BY created_at DESC LIMIT 10", s=status)
+        rows = conn.run("SELECT id,woo_order_id,customer_name,total,status FROM orders WHERE status=:s ORDER BY created_at DESC LIMIT 10", s=status)
     finally:
         conn.close()
     if not rows:
@@ -1486,7 +1288,7 @@ async def show_orders_by_status(query, status):
     keyboard = []
     for o in rows[:10]:
         text += f"🔸 #{o[1]} — {o[2]}\n   💵 ৳{o[3]} | {o[4]}\n\n"
-        keyboard.append([InlineKeyboardButton(f"✏️ #{o[1]} status change", callback_data=f"status_{o[0]}")])
+        keyboard.append([InlineKeyboardButton(f"✏️ #{o[1]} status", callback_data=f"status_{o[0]}")])
     keyboard.append([InlineKeyboardButton("🔙 Menu", callback_data="menu")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -1509,17 +1311,13 @@ async def show_month_report(query):
     try:
         o  = conn.run("SELECT COUNT(*), COALESCE(SUM(total),0) FROM orders WHERE created_at>=:s", s=since)
         i  = conn.run("SELECT COALESCE(SUM(amount),0) FROM income WHERE created_at>=:s", s=since)
-        rb = conn.run(
-            "SELECT COUNT(*), COALESCE(SUM(amount),0) FROM reseller_bot_orders "
-            "WHERE created_at>=:s AND status='completed'", s=since)
+        rb = conn.run("SELECT COUNT(*), COALESCE(SUM(amount),0) FROM reseller_bot_orders WHERE created_at>=:s AND status='completed'", s=since)
     finally:
         conn.close()
-    text = (
-        f"📊 *Last 30 দিনের Report*\n\n"
-        f"🌐 WooCommerce Orders: {o[0][0] or 0}টা | ৳{o[0][1] or 0}\n"
-        f"🛍️ Reseller Bot Orders: {rb[0][0] or 0}টা | ৳{rb[0][1] or 0}\n\n"
-        f"💰 Total Income: ৳{i[0][0] or 0}"
-    )
+    text = (f"📊 *Last 30 দিনের Report*\n\n"
+            f"🌐 WooCommerce: {o[0][0] or 0}টা | ৳{o[0][1] or 0}\n"
+            f"🛍️ Reseller Bot: {rb[0][0] or 0}টা | ৳{rb[0][1] or 0}\n\n"
+            f"💰 Total Income: ৳{i[0][0] or 0}")
     await query.edit_message_text(text,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]),
         parse_mode="Markdown")
@@ -1529,29 +1327,24 @@ async def show_resellers(query):
     try:
         rows = conn.run("""
             SELECT r.name, r.phone, r.reseller_code,
-                COUNT(DISTINCT ro.id),   COALESCE(SUM(ro.price*ro.quantity),0),
-                COUNT(DISTINCT rbo.id),  COALESCE(SUM(rbo.amount),0)
+                COUNT(DISTINCT ro.id), COALESCE(SUM(ro.price*ro.quantity),0),
+                COUNT(DISTINCT rbo.id), COALESCE(SUM(rbo.amount),0)
             FROM resellers r
-            LEFT JOIN reseller_orders ro ON r.id=ro.reseller_id
-                AND ro.created_at>=date_trunc('month',NOW())
-            LEFT JOIN reseller_bot_orders rbo ON r.id=rbo.reseller_id
-                AND rbo.created_at>=date_trunc('month',NOW())
-                AND rbo.status!='rejected'
+            LEFT JOIN reseller_orders ro ON r.id=ro.reseller_id AND ro.created_at>=date_trunc('month',NOW())
+            LEFT JOIN reseller_bot_orders rbo ON r.id=rbo.reseller_id AND rbo.created_at>=date_trunc('month',NOW()) AND rbo.status!='rejected'
             GROUP BY r.id,r.name,r.phone,r.reseller_code
         """)
     finally:
         conn.close()
     if not rows:
-        await query.edit_message_text("👥 Kono reseller nei.\n\nAdd: `/addreseller naam phone CODE`",
+        await query.edit_message_text("👥 Kono reseller nei.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]),
             parse_mode="Markdown"); return
     text = "👥 *এই মাসের Reseller Report:*\n\n"
     for r in rows:
         t_orders = (r[3] or 0) + (r[5] or 0)
         t_amount = float(r[4] or 0) + float(r[6] or 0)
-        text += (f"🔸 *{r[0]}* ({r[1]}) — `{r[2] or 'N/A'}`\n"
-                 f"   Manual: {r[3]}টা | Bot: {r[5]}টা | মোট: {t_orders}টা\n"
-                 f"   💵 ৳{t_amount:.0f}\n\n")
+        text += f"🔸 *{r[0]}* ({r[1]}) — `{r[2] or 'N/A'}`\n   {t_orders}টা | ৳{t_amount:.0f}\n\n"
     await query.edit_message_text(text,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]),
         parse_mode="Markdown")
@@ -1559,7 +1352,7 @@ async def show_resellers(query):
 async def show_reseller_bot_orders_today(query):
     orders = db_get_today_reseller_bot_orders()
     if not orders:
-        await query.edit_message_text("🛍️ আজ এখনো কোনো reseller bot order নেই।",
+        await query.edit_message_text("🛍️ আজ কোনো reseller bot order নেই।",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]])); return
     text = f"🛍️ *আজকের Reseller Bot Orders ({len(orders)}টা):*\n\n"
     keyboard = []
@@ -1567,40 +1360,30 @@ async def show_reseller_bot_orders_today(query):
         emoji = STATUS_EMOJI.get(o["status"], "❓")
         label = STATUS_LABEL.get(o["status"], o["status"])
         text += (f"{emoji} #{o['id']} — *{o['reseller_name']}* (`{o['reseller_code']}`)\n"
-                 f"   📦 {o['product']} | {o['amount']} | {label}\n"
-                 f"   📧 {o['email']}\n\n")
+                 f"   📦 {o['product']} | {o['amount']} | {label}\n\n")
         if o["status"] == STATUS_PENDING:
             keyboard.append([
                 InlineKeyboardButton(f"✅ Approve #{o['id']}", callback_data=f"rapprove_{o['id']}"),
                 InlineKeyboardButton(f"❌ Reject #{o['id']}",  callback_data=f"rreject_{o['id']}")
             ])
         elif o["status"] == STATUS_PAYMENT_DUE:
-            keyboard.append([
-                InlineKeyboardButton(f"📩 Remind #{o['id']}", callback_data=f"rsend_reminder_{o['id']}")
-            ])
+            keyboard.append([InlineKeyboardButton(f"📩 Remind #{o['id']}", callback_data=f"rsend_reminder_{o['id']}")])
     keyboard.append([InlineKeyboardButton("🔙 Menu", callback_data="menu")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def show_due_baki(query):
     due_list = db_get_payment_due_summary()
     if not due_list:
-        await query.edit_message_text(
-            "✅ *সব clear!*\n\nকোনো reseller এর payment বাকি নেই।",
+        await query.edit_message_text("✅ *সব clear!*\n\nকোনো payment বাকি নেই।",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]),
             parse_mode="Markdown"); return
-
     total_due = sum(float(d["due_amount"].replace("৳","")) for d in due_list)
-    text = f"💸 *Due বাকি — Reseller Payment:*\n\n"
+    text = "💸 *Due বাকি:*\n\n"
     keyboard = []
     for d in due_list:
-        text += (f"🔸 *{d['name']}* (`{d['reseller_code']}`)\n"
-                 f"   📦 {d['due_orders']}টা order | 💵 {d['due_amount']} বাকি\n\n")
-        keyboard.append([
-            InlineKeyboardButton(
-                f"📩 {d['name']} কে Remind করো",
-                callback_data=f"remind_reseller_{d['reseller_code']}")
-        ])
-    text += f"💰 *মোট বাকি: ৳{total_due:.0f}*"
+        text += f"🔸 *{d['name']}* (`{d['reseller_code']}`)\n   {d['due_orders']}টা | {d['due_amount']} বাকি\n\n"
+        keyboard.append([InlineKeyboardButton(f"📩 {d['name']} Remind", callback_data=f"remind_reseller_{d['reseller_code']}")])
+    text += f"💰 *মোট: ৳{total_due:.0f}*"
     keyboard.append([InlineKeyboardButton("🔙 Menu", callback_data="menu")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -1634,7 +1417,7 @@ async def income_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount = float(context.args[0])
         note   = " ".join(context.args[1:]) if len(context.args) > 1 else "Manual entry"
         db_add_income(amount, note)
-        await update.message.reply_text(f"✅ ৳{amount} income add hoye geche!\n📝 {note}")
+        await update.message.reply_text(f"✅ ৳{amount} income add!\n📝 {note}")
     except:
         await update.message.reply_text("❌ Vul format!")
 
@@ -1645,8 +1428,8 @@ async def customer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn  = get_db()
     try:
         rows = conn.run(
-            "SELECT woo_order_id,customer_name,total,status,created_at "
-            "FROM orders WHERE LOWER(customer_email)=:e ORDER BY created_at DESC", e=email)
+            "SELECT woo_order_id,customer_name,total,status,created_at FROM orders WHERE LOWER(customer_email)=:e ORDER BY created_at DESC",
+            e=email)
     finally:
         conn.close()
     if not rows:
@@ -1654,45 +1437,28 @@ async def customer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_spent = sum(float(o[2]) for o in rows)
     text = f"👤 *{rows[0][1]}*\n📧 {email}\n\n"
     for o in rows:
-        emoji = "✅" if o[3] == "completed" else "⏳" if o[3] == "processing" else "❌"
+        emoji = "✅" if o[3]=="completed" else "⏳" if o[3]=="processing" else "❌"
         text += f"{emoji} #{o[0]} — {o[4].strftime('%d %b %Y')} | ৳{o[2]} | {o[3]}\n"
     text += f"\n💰 *মোট: ৳{total_spent:.2f}*"
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def subscription_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /sub email@gmail.com
-    Email দিয়ে সব subscription দেখাও + Renew/Cancel buttons
-    """
+    """/sub email@gmail.com — subscription check"""
     if not context.args:
-        await update.message.reply_text(
-            "📋 Format: `/sub email@gmail.com`\n\nExample: `/sub john@gmail.com`",
-            parse_mode="Markdown"
-        )
-        return
-
+        await update.message.reply_text("📋 Format: `/sub email@gmail.com`", parse_mode="Markdown"); return
     email = context.args[0].lower().strip()
     await update.message.reply_text(f"🔍 `{email}` এর subscriptions খুঁজছি...", parse_mode="Markdown")
-
     subs = get_subscriptions_by_email(email)
-
     if not subs:
         await update.message.reply_text(
-            f"❌ `{email}` এ কোনো subscription পাওয়া যায়নি।\n\n"
-            f"নতুন subscription create করতে:\n`/newsub {email} phone password`",
-            parse_mode="Markdown"
-        )
-        return
-
+            f"❌ `{email}` এ কোনো subscription নেই।\n\nনতুন create করতে:\n`/newsub {email} phone password`",
+            parse_mode="Markdown"); return
     text = f"📋 *{email} এর Subscriptions ({len(subs)}টা):*\n\n"
     keyboard = []
-
     for sub in subs:
         sub_id = sub.get("id")
         status = sub.get("status", "unknown")
-        text  += format_subscription_text(sub)
-        text  += "\n"
-
+        text  += format_subscription_text(sub) + "\n"
         row = []
         if status in ["active", "on-hold", "pending"]:
             row.append(InlineKeyboardButton(f"🔄 #{sub_id} Renew",  callback_data=f"sub_renew_{sub_id}"))
@@ -1701,74 +1467,61 @@ async def subscription_command(update: Update, context: ContextTypes.DEFAULT_TYP
             row.append(InlineKeyboardButton(f"🔄 #{sub_id} Reactivate", callback_data=f"sub_renew_{sub_id}"))
         if row:
             keyboard.append(row)
-
     keyboard.append([InlineKeyboardButton("🏠 Menu", callback_data="menu")])
-
-    await update.message.reply_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def new_subscription_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /newsub email phone password
-    নতুন client এর জন্য WooCommerce এ customer + order create করো
-    """
+    """/newsub email phone password — dynamic product+variation select করে order create করো"""
     if len(context.args) < 3:
         await update.message.reply_text(
-            "📋 Format:\n`/newsub email phone password`\n\n"
-            "Example:\n`/newsub john@gmail.com 01712345678 Pass@123`",
-            parse_mode="Markdown"
-        )
-        return
+            "📋 Format:\n`/newsub email phone password`\n\nExample:\n`/newsub john@gmail.com 01712345678 Pass@123`",
+            parse_mode="Markdown"); return
 
     email    = context.args[0].lower().strip()
     phone    = context.args[1].strip()
     password = context.args[2].strip()
 
-    # Product select করতে বলো
+    # Context এ save করো
     context.user_data["newsub_email"]    = email
     context.user_data["newsub_phone"]    = phone
     context.user_data["newsub_password"] = password
 
-    keyboard = [
-        [InlineKeyboardButton(f"🤖 ChatGPT Plus — ৳{PRODUCTS['chatgpt']['price']}",
-                              callback_data="newsub_product_chatgpt")],
-        [InlineKeyboardButton(f"💎 Gemini Advanced — ৳{PRODUCTS['gemini']['price']}",
-                              callback_data="newsub_product_gemini")],
-    ]
+    await update.message.reply_text(f"✅ Client details নেওয়া হয়েছে!\n📧 {email}\n📱 {phone}\n\n⏳ Products fetch করছি...")
+
+    # WooCommerce থেকে subscription products আনো
+    products = fetch_subscription_products()
+
+    if not products:
+        await update.message.reply_text(
+            "❌ কোনো subscription product পাওয়া যায়নি।\n\nWooCommerce এ 'Subscriptions' category তে product আছে কিনা দেখো।")
+        return
+
+    keyboard = []
+    for p in products:
+        keyboard.append([InlineKeyboardButton(f"📦 {p['name']}", callback_data=f"newsub_prod_{p['id']}")])
+    keyboard.append([InlineKeyboardButton("🏠 Menu", callback_data="menu")])
+
     await update.message.reply_text(
-        f"✅ Client details নেওয়া হয়েছে!\n\n"
-        f"📧 {email}\n"
-        f"📱 {phone}\n\n"
-        f"কোন plan এ subscription create করবে?",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+        f"🛍️ *কোন product এর subscription create করবে?*\n\n"
+        f"_(WooCommerce থেকে real-time fetch করা হয়েছে)_",
+        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def listresellers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = get_db()
     try:
-        rows = conn.run(
-            "SELECT id, name, phone, reseller_code FROM resellers ORDER BY id")
+        rows = conn.run("SELECT id, name, phone, reseller_code FROM resellers ORDER BY id")
     finally:
         conn.close()
     if not rows:
         await update.message.reply_text("কোনো reseller নেই।"); return
-    text = "👥 *সব Reseller (ID সহ):*\n\n"
+    text = "👥 *সব Reseller:*\n\n"
     keyboard = []
     for r in rows:
         rid, name, phone, code = r[0], r[1], r[2], r[3] or "N/A"
         text += f"🔸 ID:`{rid}` — *{name}* | 📞`{phone}` | 🔑`{code}`\n"
-        keyboard.append([
-            InlineKeyboardButton(
-                f"🗑️ {name} ({code}) বাদ দাও",
-                callback_data=f"confirm_remove_reseller_{rid}_ID{rid}")
-        ])
+        keyboard.append([InlineKeyboardButton(f"🗑️ {name} বাদ দাও", callback_data=f"confirm_remove_reseller_{rid}_ID{rid}")])
     keyboard.append([InlineKeyboardButton("🔙 Menu", callback_data="menu")])
-    await update.message.reply_text(
-        text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def addreseller_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 3:
@@ -1776,68 +1529,39 @@ async def addreseller_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     name, phone, code = context.args[0], context.args[1], context.args[2].upper()
     conn = get_db()
     try:
-        conn.run("INSERT INTO resellers (name,phone,reseller_code) VALUES (:n,:p,:c)",
-                 n=name, p=phone, c=code)
+        conn.run("INSERT INTO resellers (name,phone,reseller_code) VALUES (:n,:p,:c)", n=name, p=phone, c=code)
     finally:
         conn.close()
     await update.message.reply_text(f"✅ Reseller added!\n👤 {name} | 📞 {phone} | 🔑 {code}")
 
 async def removereseller_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 1:
-        await update.message.reply_text(
-            "Format:\n"
-            "`/removereseller RS001` — code দিয়ে\n"
-            "`/removereseller 01712345678` — phone দিয়ে",
-            parse_mode="Markdown"); return
+        await update.message.reply_text("Format: `/removereseller RS001`", parse_mode="Markdown"); return
     query_val = context.args[0].upper()
     conn = get_db()
     try:
         if context.args[0][0].isdigit():
-            rows = conn.run(
-                "SELECT id, name, phone, reseller_code FROM resellers WHERE phone=:p",
-                p=context.args[0])
+            rows = conn.run("SELECT id,name,phone,reseller_code FROM resellers WHERE phone=:p", p=context.args[0])
         else:
-            rows = conn.run(
-                "SELECT id, name, phone, reseller_code FROM resellers WHERE UPPER(reseller_code)=:c",
-                c=query_val)
+            rows = conn.run("SELECT id,name,phone,reseller_code FROM resellers WHERE UPPER(reseller_code)=:c", c=query_val)
         if not rows:
-            await update.message.reply_text(
-                f"❌ `{context.args[0]}` দিয়ে কোনো reseller পাওয়া যায়নি।",
-                parse_mode="Markdown"); return
-        reseller_id    = rows[0][0]
-        reseller_name  = rows[0][1]
-        reseller_phone = rows[0][2]
-        reseller_code  = rows[0][3] or "N/A"
-        active = conn.run(
-            "SELECT COUNT(*) FROM reseller_bot_orders "
-            "WHERE reseller_id=:rid AND status NOT IN ('completed','rejected')",
-            rid=reseller_id)
+            await update.message.reply_text(f"❌ `{context.args[0]}` পাওয়া যায়নি।", parse_mode="Markdown"); return
+        reseller_id = rows[0][0]; reseller_name = rows[0][1]; reseller_phone = rows[0][2]; reseller_code = rows[0][3] or "N/A"
+        active = conn.run("SELECT COUNT(*) FROM reseller_bot_orders WHERE reseller_id=:rid AND status NOT IN ('completed','rejected')", rid=reseller_id)
         active_count = active[0][0] if active else 0
     finally:
         conn.close()
-
     safe_code = reseller_code.replace(".", "_")
     cb_data   = f"confirm_remove_reseller_{reseller_id}_{safe_code}"
-
     if active_count > 0:
-        keyboard = [[
-            InlineKeyboardButton("⚠️ হ্যাঁ, তারপরেও বাদ দাও", callback_data=cb_data),
-            InlineKeyboardButton("❌ Cancel", callback_data="menu")
-        ]]
+        keyboard = [[InlineKeyboardButton("⚠️ তারপরেও বাদ দাও", callback_data=cb_data),InlineKeyboardButton("❌ Cancel",callback_data="menu")]]
         await update.message.reply_text(
-            f"⚠️ *সতর্কতা!*\n\n"
-            f"👤 {reseller_name} (`{reseller_code}`) এর *{active_count}টা active order* আছে!\n\n"
-            f"বাদ দিলে সেই orders এ আর access থাকবে না।\n"
-            f"তারপরেও বাদ দিতে চাও?",
+            f"⚠️ {reseller_name} এর *{active_count}টা active order* আছে! তারপরেও বাদ দেবে?",
             reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     else:
-        keyboard = [[
-            InlineKeyboardButton("✅ হ্যাঁ, বাদ দাও", callback_data=cb_data),
-            InlineKeyboardButton("❌ Cancel", callback_data="menu")
-        ]]
+        keyboard = [[InlineKeyboardButton("✅ বাদ দাও", callback_data=cb_data),InlineKeyboardButton("❌ Cancel",callback_data="menu")]]
         await update.message.reply_text(
-            f"🗑️ *Reseller বাদ দেবে?*\n\n"
-            f"👤 {reseller_name} | 📞 {reseller_phone} | 🔑 `{reseller_code}`",
+            f"🗑️ *{reseller_name}* বাদ দেবে?\n📞 {reseller_phone} | 🔑 `{reseller_code}`",
             reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def resellersale_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1871,68 +1595,42 @@ def _wp_paylater_api(method, endpoint, email=None):
     except Exception as e:
         return {"success": False, "message": str(e)}
 
-async def paylater_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 1:
-        await update.message.reply_text(
-            "Format: `/paylater add example@gmail.com`", parse_mode="Markdown"); return
-    email  = context.args[0].lower().strip()
-    result = _wp_paylater_api("POST", "add", email)
-    if result.get("success"):
-        await update.message.reply_text(
-            f"✅ *Pay Later চালু হয়েছে!*\n\n📧 `{email}`",
-            parse_mode="Markdown")
-    elif result.get("message") == "Already exists":
-        await update.message.reply_text(
-            f"ℹ️ `{email}` আগে থেকেই approved আছে।", parse_mode="Markdown")
-    else:
-        await update.message.reply_text(
-            f"❌ Error: {result.get('message', 'Unknown error')}")
-
-async def paylater_remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 1:
-        await update.message.reply_text(
-            "Format: `/paylater remove example@gmail.com`", parse_mode="Markdown"); return
-    email  = context.args[0].lower().strip()
-    result = _wp_paylater_api("POST", "remove", email)
-    if result.get("success"):
-        await update.message.reply_text(
-            f"🗑️ *Pay Later বাদ দেওয়া হয়েছে!*\n\n📧 `{email}`",
-            parse_mode="Markdown")
-    else:
-        await update.message.reply_text(
-            f"❌ `{email}` পাওয়া যায়নি।", parse_mode="Markdown")
-
-async def paylater_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    result = _wp_paylater_api("GET", "list")
-    if not result.get("success"):
-        await update.message.reply_text(f"❌ Error: {result.get('message')}"); return
-    emails = result.get("emails", [])
-    if not emails:
-        await update.message.reply_text("📋 কোনো approved email নেই।"); return
-    text = f"📋 *Approved Pay Later Emails ({len(emails)}টা):*\n\n"
-    for i, e in enumerate(emails, 1):
-        text += f"{i}. `{e}`\n"
-    await update.message.reply_text(text, parse_mode="Markdown")
-
 async def paylater_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 1:
         await update.message.reply_text(
-            "📋 *Pay Later Commands:*\n\n"
-            "`/paylater add email@gmail.com` — approve করো\n"
-            "`/paylater remove email@gmail.com` — বাদ দাও\n"
-            "`/paylater list` — সব approved emails দেখো",
+            "📋 *Pay Later:*\n\n`/paylater add email`\n`/paylater remove email`\n`/paylater list`",
             parse_mode="Markdown"); return
     sub = context.args[0].lower()
     context.args = context.args[1:]
     if sub == "add":
-        await paylater_add_command(update, context)
+        if not context.args:
+            await update.message.reply_text("Format: `/paylater add email`", parse_mode="Markdown"); return
+        email  = context.args[0].lower().strip()
+        result = _wp_paylater_api("POST", "add", email)
+        if result.get("success"):
+            await update.message.reply_text(f"✅ Pay Later চালু!\n📧 `{email}`", parse_mode="Markdown")
+        else:
+            await update.message.reply_text(f"❌ Error: {result.get('message', 'Unknown')}")
     elif sub == "remove":
-        await paylater_remove_command(update, context)
+        if not context.args:
+            await update.message.reply_text("Format: `/paylater remove email`", parse_mode="Markdown"); return
+        email  = context.args[0].lower().strip()
+        result = _wp_paylater_api("POST", "remove", email)
+        if result.get("success"):
+            await update.message.reply_text(f"🗑️ Pay Later বাদ!\n📧 `{email}`", parse_mode="Markdown")
+        else:
+            await update.message.reply_text(f"❌ `{email}` পাওয়া যায়নি।")
     elif sub == "list":
-        await paylater_list_command(update, context)
-    else:
-        await update.message.reply_text(
-            "❌ Unknown subcommand। Use: `add`, `remove`, `list`", parse_mode="Markdown")
+        result = _wp_paylater_api("GET", "list")
+        if not result.get("success"):
+            await update.message.reply_text(f"❌ Error: {result.get('message')}"); return
+        emails = result.get("emails", [])
+        if not emails:
+            await update.message.reply_text("📋 কোনো approved email নেই।"); return
+        text = f"📋 *Approved ({len(emails)}টা):*\n\n"
+        for i, e in enumerate(emails, 1):
+            text += f"{i}. `{e}`\n"
+        await update.message.reply_text(text, parse_mode="Markdown")
 
 # =================== RESELLER BOT ===================
 
@@ -1940,9 +1638,9 @@ reseller_user_data: dict = {}
 
 def reseller_main_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🛒 নতুন Order দিব",   callback_data="res_new_order")],
-        [InlineKeyboardButton("📋 আমার Orders",       callback_data="res_my_orders")],
-        [InlineKeyboardButton("ℹ️ Price List",        callback_data="res_price_list")],
+        [InlineKeyboardButton("🛒 নতুন Order দিব", callback_data="res_new_order")],
+        [InlineKeyboardButton("📋 আমার Orders",     callback_data="res_my_orders")],
+        [InlineKeyboardButton("ℹ️ Price List",      callback_data="res_price_list")],
     ])
 
 async def reseller_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1951,22 +1649,17 @@ async def reseller_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if reseller:
         conn = get_db()
         try:
-            due = conn.run(
-                "SELECT COUNT(*) FROM reseller_bot_orders "
-                "WHERE reseller_code=:c AND status='payment_due'",
-                c=reseller["code"])
+            due = conn.run("SELECT COUNT(*) FROM reseller_bot_orders WHERE reseller_code=:c AND status='payment_due'", c=reseller["code"])
         finally:
             conn.close()
         due_count = due[0][0] if due else 0
-        due_txt   = f"\n\n⚠️ *{due_count}টা order এর payment বাকি আছে!*" if due_count > 0 else ""
+        due_txt   = f"\n\n⚠️ *{due_count}টা payment বাকি!*" if due_count > 0 else ""
         await update.message.reply_text(
-            f"🛍️ Welcome back *{reseller['name']}* bhai! 👋\n"
-            f"Code: `{reseller['code']}`{due_txt}\n\nKi korte chao?",
+            f"🛍️ Welcome back *{reseller['name']}* bhai! 👋\nCode: `{reseller['code']}`{due_txt}\n\nKi korte chao?",
             reply_markup=reseller_main_menu(), parse_mode="Markdown")
         return ConversationHandler.END
     await update.message.reply_text(
-        "🛍️ *FD Reseller Bot*\n\nAssalamualaikum! 👋\n\n"
-        "Tomar *reseller code* dao (admin er kach theke pawa):",
+        "🛍️ *FD Reseller Bot*\n\nAssalamualaikum! 👋\n\nTomar *reseller code* dao:",
         parse_mode="Markdown")
     return WAITING_CODE
 
@@ -1975,17 +1668,15 @@ async def reseller_handle_code(update: Update, context: ContextTypes.DEFAULT_TYP
     chat_id  = update.message.chat_id
     reseller = get_reseller_by_code(code)
     if not reseller:
-        await update.message.reply_text("❌ Ei code valid na bhai. Sothik code dao:")
+        await update.message.reply_text("❌ Ei code valid na. Sothik code dao:")
         return WAITING_CODE
     conn = get_db()
     try:
-        conn.run("UPDATE resellers SET telegram_chat_id=:c WHERE UPPER(reseller_code)=UPPER(:code)",
-                 c=str(chat_id), code=code)
+        conn.run("UPDATE resellers SET telegram_chat_id=:c WHERE UPPER(reseller_code)=UPPER(:code)", c=str(chat_id), code=code)
     finally:
         conn.close()
     await update.message.reply_text(
-        f"✅ *Register Successful!*\n\nWelcome *{reseller['name']}* bhai! 🎉\n"
-        f"Code: `{code}`\n\nEkhon order dite paro!",
+        f"✅ *Register Successful!*\n\nWelcome *{reseller['name']}* bhai! 🎉\nCode: `{code}`",
         reply_markup=reseller_main_menu(), parse_mode="Markdown")
     return ConversationHandler.END
 
@@ -1997,10 +1688,8 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
 
     if data == "res_price_list":
         await query.edit_message_text(
-            f"📋 *Price List:*\n\n"
-            f"🤖 ChatGPT Plus Business (1 Month) — *৳{PRODUCTS['chatgpt']['price']}*\n"
-            f"💎 Gemini Advanced (1 Month) — *৳{PRODUCTS['gemini']['price']}*\n\n"
-            f"Order দিতে 'নতুন Order দিব' press koro!",
+            f"📋 *Price List:*\n\n🤖 ChatGPT Plus — *৳{PRODUCTS['chatgpt']['price']}*\n"
+            f"💎 Gemini Advanced — *৳{PRODUCTS['gemini']['price']}*",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="res_back")]]),
             parse_mode="Markdown")
         return
@@ -2011,8 +1700,7 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
             [InlineKeyboardButton(f"💎 Gemini Advanced — ৳{PRODUCTS['gemini']['price']}", callback_data="res_order_gemini")],
             [InlineKeyboardButton("🔙 Back", callback_data="res_back")]
         ]
-        await query.edit_message_text("🛒 *কোন product order করতে চাও?*",
-            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        await query.edit_message_text("🛒 *কোন product?*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
     elif data.startswith("res_order_"):
         product_key = data.replace("res_order_", "")
@@ -2023,14 +1711,13 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
                 "amount": product["price"], "state": "waiting_email"
             }
             await query.edit_message_text(
-                f"📦 *{product['name']}*\n💵 ৳{product['price']}\n\n"
-                f"👇 *Customer এর Gmail/email দাও:*\n_(যার জন্য কিনছো তার email)_",
+                f"📦 *{product['name']}*\n💵 ৳{product['price']}\n\n👇 *Customer এর email দাও:*",
                 parse_mode="Markdown")
 
     elif data == "res_my_orders":
         reseller = get_reseller_by_chat_id(chat_id)
         if not reseller:
-            await query.edit_message_text("❌ Register koro aage. /start dao."); return
+            await query.edit_message_text("❌ /start দাও।"); return
         conn = get_db()
         try:
             rows = conn.run(
@@ -2040,25 +1727,19 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
         finally:
             conn.close()
         if not rows:
-            await query.edit_message_text("📋 এখনো কোনো order নেই বাই।",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="res_back")]])); return
-        text = "📋 *তোমার Last 10 Order:*\n\n"
+            await query.edit_message_text("📋 কোনো order নেই।",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="res_back")]])); return
+        text = "📋 *Last 10 Order:*\n\n"
         keyboard = []
         for r in rows:
             emoji = STATUS_EMOJI.get(r[4], "❓")
             label = STATUS_LABEL.get(r[4], r[4])
             date_s = r[6].strftime("%d %b, %I:%M %p") if r[6] else ""
-            text  += (f"{emoji} *#{r[0]}* — {r[1]}\n"
-                      f"   📧 {r[2]}\n"
-                      f"   💵 ৳{r[3]} | {label} | {date_s}\n\n")
+            text  += f"{emoji} *#{r[0]}* — {r[1]}\n   📧 {r[2]}\n   💵 ৳{r[3]} | {label} | {date_s}\n\n"
             if r[4] == STATUS_PAYMENT_DUE:
-                keyboard.append([
-                    InlineKeyboardButton(f"💳 #{r[0]} Payment করব", callback_data=f"res_pay_order_{r[0]}")
-                ])
+                keyboard.append([InlineKeyboardButton(f"💳 #{r[0]} Payment", callback_data=f"res_pay_order_{r[0]}")])
             elif r[4] == STATUS_ACCOUNT_DELIVERED:
-                keyboard.append([
-                    InlineKeyboardButton(f"✅ #{r[0]} Client পেয়েছে!", callback_data=f"res_client_got_{r[0]}")
-                ])
+                keyboard.append([InlineKeyboardButton(f"✅ #{r[0]} Client পেয়েছে!", callback_data=f"res_client_got_{r[0]}")])
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="res_back")])
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -2067,127 +1748,73 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
         order    = get_reseller_bot_order(order_id)
         if order:
             already_paid = order.get("transaction_id") and order["transaction_id"] != "LATER"
-
+            conn = get_db()
+            try:
+                conn.run("UPDATE reseller_bot_orders SET status='payment_due', payment_due_at=NOW() WHERE id=:id", id=order_id)
+            finally:
+                conn.close()
             if already_paid:
-                conn = get_db()
-                try:
-                    conn.run(
-                        "UPDATE reseller_bot_orders SET status='payment_due', payment_due_at=NOW() WHERE id=:id",
-                        id=order_id)
-                finally:
-                    conn.close()
                 try:
                     from telegram import Bot
                     txn = order["transaction_id"]
                     method_label = "Nagad" if order.get("payment_method") == "nagad" else "Bkash"
-                    admin_keyboard = [[
-                        InlineKeyboardButton("✅ টাকা পেয়েছি — Complete", callback_data=f"rcomplete_{order_id}"),
+                    admin_kb = [[
+                        InlineKeyboardButton("✅ Complete", callback_data=f"rcomplete_{order_id}"),
                         InlineKeyboardButton("❌ TxnID ভুল", callback_data=f"rwrong_txn_{order_id}")
                     ]]
                     await Bot(token=BOT_TOKEN).send_message(
                         chat_id=MAIN_CHAT_ID,
-                        text=(
-                            f"✅ *Client Account Confirm করেছে!*\n\n"
-                            f"Reseller: `{order['reseller_code']}`\n"
-                            f"Order #{order_id} — {order['product']}\n"
-                            f"📧 {order['customer_email']}\n"
-                            f"💵 ৳{order['amount']}\n\n"
-                            f"💳 {method_label} TxnID: `{txn}`\n\n"
-                            f"TxnID check করে complete করো 👇"
-                        ),
-                        reply_markup=InlineKeyboardMarkup(admin_keyboard),
-                        parse_mode="Markdown"
-                    )
+                        text=(f"✅ *Client Confirmed!*\n\nOrder #{order_id}\n{method_label} TxnID: `{txn}`\n\nVerify করো 👇"),
+                        reply_markup=InlineKeyboardMarkup(admin_kb), parse_mode="Markdown")
                 except Exception as e:
-                    logger.error(f"Admin txn verify notify error: {e}")
-
+                    logger.error(f"Admin txn verify error: {e}")
                 await query.edit_message_text(
-                    f"✅ *Confirmed!*\n\nOrder #{order_id} — Client account পেয়েছে।\n\n"
-                    f"তুমি আগেই payment করেছিলে। Admin TxnID verify করে complete করবে। Notify করব!",
+                    f"✅ Order #{order_id} confirmed! Admin verify করবে।",
                     reply_markup=reseller_main_menu(), parse_mode="Markdown")
-
             else:
-                conn = get_db()
-                try:
-                    conn.run(
-                        "UPDATE reseller_bot_orders SET status='payment_due', payment_due_at=NOW() WHERE id=:id",
-                        id=order_id)
-                finally:
-                    conn.close()
                 try:
                     conn2 = get_db()
                     try:
-                        rrows = conn2.run(
-                            "SELECT telegram_chat_id FROM resellers WHERE UPPER(reseller_code)=UPPER(:c)",
-                            c=order["reseller_code"])
+                        rrows = conn2.run("SELECT telegram_chat_id FROM resellers WHERE UPPER(reseller_code)=UPPER(:c)", c=order["reseller_code"])
                     finally:
                         conn2.close()
                     if rrows and rrows[0][0]:
                         from telegram import Bot
-                        pay_keyboard = [[
-                            InlineKeyboardButton("💳 Payment করব", callback_data=f"res_pay_order_{order_id}")
-                        ]]
+                        pay_kb = [[InlineKeyboardButton("💳 Payment করব", callback_data=f"res_pay_order_{order_id}")]]
                         await Bot(token=RESELLER_BOT_TOKEN).send_message(
                             chat_id=rrows[0][0],
-                            text=(
-                                f"💰 *Payment Due শুরু হয়েছে!*\n\n"
-                                f"Order #{order_id} — {order['product']}\n"
-                                f"📧 {order['customer_email']}\n"
-                                f"💵 ৳{order['amount']}\n\n"
-                                f"Client account confirm করেছে। এখন payment করো 👇"
-                            ),
-                            reply_markup=InlineKeyboardMarkup(pay_keyboard),
-                            parse_mode="Markdown"
-                        )
+                            text=(f"💰 *Payment Due!*\n\nOrder #{order_id}\n💵 ৳{order['amount']}\n\nPayment করো 👇"),
+                            reply_markup=InlineKeyboardMarkup(pay_kb), parse_mode="Markdown")
                 except Exception as e:
-                    logger.error(f"Reseller payment due notify error: {e}")
-
+                    logger.error(f"Reseller payment due error: {e}")
                 try:
                     from telegram import Bot
-                    admin_keyboard = [[
-                        InlineKeyboardButton("📩 Remind পাঠাও", callback_data=f"rsend_reminder_{order_id}")
-                    ]]
+                    admin_kb = [[InlineKeyboardButton("📩 Remind", callback_data=f"rsend_reminder_{order_id}")]]
                     await Bot(token=BOT_TOKEN).send_message(
                         chat_id=MAIN_CHAT_ID,
-                        text=(
-                            f"💰 *Payment Due শুরু হয়েছে!*\n\n"
-                            f"Reseller: `{order['reseller_code']}`\n"
-                            f"Order #{order_id} — {order['product']}\n"
-                            f"📧 {order['customer_email']}\n"
-                            f"💵 ৳{order['amount']}\n\n"
-                            f"Client account confirm করেছে। Payment এর জন্য অপেক্ষা।"
-                        ),
-                        reply_markup=InlineKeyboardMarkup(admin_keyboard),
-                        parse_mode="Markdown"
-                    )
+                        text=(f"💰 *Payment Due!*\n\nReseller: `{order['reseller_code']}`\nOrder #{order_id}\n💵 ৳{order['amount']}"),
+                        reply_markup=InlineKeyboardMarkup(admin_kb), parse_mode="Markdown")
                 except Exception as e:
-                    logger.error(f"Admin payment due notify error: {e}")
-
-                confirmed_keyboard = [[
-                    InlineKeyboardButton("💳 Payment করব", callback_data=f"res_pay_order_{order_id}")
-                ]]
+                    logger.error(f"Admin payment due error: {e}")
+                confirmed_kb = [[InlineKeyboardButton("💳 Payment করব", callback_data=f"res_pay_order_{order_id}")]]
                 await query.edit_message_text(
-                    f"✅ *Confirmed!*\n\nOrder #{order_id} — Client account পেয়েছে।\n\nএখন payment করো 👇",
-                    reply_markup=InlineKeyboardMarkup(confirmed_keyboard), parse_mode="Markdown")
+                    f"✅ Confirmed! Order #{order_id}.\n\nPayment করো 👇",
+                    reply_markup=InlineKeyboardMarkup(confirmed_kb), parse_mode="Markdown")
 
     elif data.startswith("res_pay_order_"):
         order_id = int(data.split("_")[3])
         order    = get_reseller_bot_order(order_id)
         if order:
             reseller_user_data[chat_id] = {
-                "paying_order_id": order_id,
-                "product_name":    order["product"],
-                "amount":          order["amount"],
-                "state":           "waiting_pay_method"
+                "paying_order_id": order_id, "product_name": order["product"],
+                "amount": order["amount"], "state": "waiting_pay_method"
             }
             keyboard = [
-                [InlineKeyboardButton("📱 Bkash",  callback_data=f"res_method_bkash_{order_id}")],
-                [InlineKeyboardButton("📱 Nagad",  callback_data=f"res_method_nagad_{order_id}")],
+                [InlineKeyboardButton("📱 Bkash", callback_data=f"res_method_bkash_{order_id}")],
+                [InlineKeyboardButton("📱 Nagad", callback_data=f"res_method_nagad_{order_id}")],
             ]
             await query.edit_message_text(
-                f"💳 *Order #{order_id} Payment*\n\n"
-                f"📦 {order['product']}\n💵 ৳{order['amount']}\n\n"
-                f"কোন method এ payment করবে?",
+                f"💳 Order #{order_id} — {order['product']}\n💵 ৳{order['amount']}\n\nKotha theke payment?",
                 reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
     elif data.startswith("res_method_"):
@@ -2195,27 +1822,21 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
         method   = parts[2]
         order_id = int(parts[3])
         number   = NAGAD_NUMBER if method == "nagad" else BKASH_NUMBER
-        reseller = get_reseller_by_chat_id(chat_id)
         if chat_id in reseller_user_data:
             reseller_user_data[chat_id]["payment_method"]  = method
             reseller_user_data[chat_id]["paying_order_id"] = order_id
             reseller_user_data[chat_id]["state"]           = "waiting_due_txn"
         order = get_reseller_bot_order(order_id)
-        number_label = "Send Money" if method == "nagad" else "Payment/Merchant Number"
+        number_label = "Send Money" if method == "nagad" else "Payment"
         await query.edit_message_text(
-            f"💳 *{method.upper()} Payment*\n\n"
-            f"📦 {order['product']}\n"
-            f"💵 Amount: ৳{order['amount']}\n\n"
-            f"📱 Number: *{number}* ({number_label})\n\n"
-            f"Payment এর পর *Transaction ID* দাও:\n"
-            f"_(Example: `8N6A7B3X2Y`)_",
+            f"💳 *{method.upper()}*\n\n📱 Number: *{number}* ({number_label})\n\n"
+            f"Payment এর পর *Transaction ID* দাও:",
             parse_mode="Markdown")
 
     elif data == "res_back":
         reseller = get_reseller_by_chat_id(chat_id)
         name = reseller["name"] if reseller else "Bhai"
-        await query.edit_message_text(
-            f"কী করতে চাও *{name}* bhai? 👇",
+        await query.edit_message_text(f"কী করবে *{name}* bhai? 👇",
             reply_markup=reseller_main_menu(), parse_mode="Markdown")
 
 async def reseller_paynow_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2223,7 +1844,7 @@ async def reseller_paynow_handler(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
     chat_id = query.message.chat_id
     if chat_id not in reseller_user_data:
-        await query.edit_message_text("❌ Session শেষ। আবার /start দাও।"); return
+        await query.edit_message_text("❌ Session শেষ। /start দাও।"); return
     amount  = reseller_user_data[chat_id].get("amount", 0)
     product = reseller_user_data[chat_id].get("product_name", "")
     reseller_user_data[chat_id]["state"] = "waiting_pay_method_new"
@@ -2232,7 +1853,7 @@ async def reseller_paynow_handler(update: Update, context: ContextTypes.DEFAULT_
         [InlineKeyboardButton("📱 Nagad", callback_data="res_pay_nagad")],
     ]
     await query.edit_message_text(
-        f"💳 *Payment Method*\n\n📦 {product}\n💵 ৳{amount}\n\nকোন method এ payment করবে?",
+        f"💳 *Payment Method*\n\n📦 {product}\n💵 ৳{amount}",
         reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def reseller_pay_method_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2242,65 +1863,55 @@ async def reseller_pay_method_handler(update: Update, context: ContextTypes.DEFA
     method  = "bkash" if query.data == "res_pay_bkash" else "nagad"
     number  = NAGAD_NUMBER if method == "nagad" else BKASH_NUMBER
     if chat_id not in reseller_user_data:
-        await query.edit_message_text("❌ Session শেষ। আবার /start দাও।"); return
+        await query.edit_message_text("❌ Session শেষ। /start দাও।"); return
     reseller_user_data[chat_id]["payment_method"] = method
     reseller_user_data[chat_id]["state"]          = "waiting_transaction"
     amount_val = reseller_user_data.get(chat_id, {}).get("amount", "?")
     product    = reseller_user_data.get(chat_id, {}).get("product_name", "")
-    number_label = "Send Money" if method == "nagad" else "Payment/Merchant Number"
+    number_label = "Send Money" if method == "nagad" else "Payment"
     await query.edit_message_text(
-        f"💳 *{method.upper()} Payment*\n\n"
-        f"📦 {product}\n💵 Amount: ৳{amount_val}\n\n"
-        f"📱 Number: *{number}* ({number_label})\n\n"
-        f"Payment এর পর *Transaction ID* দাও:\n"
-        f"_(Example: `8N6A7B3X2Y`)_",
+        f"💳 *{method.upper()}*\n\n📦 {product}\n💵 ৳{amount_val}\n\n"
+        f"📱 Number: *{number}* ({number_label})\n\nTransaction ID দাও:",
         parse_mode="Markdown")
 
 async def reseller_handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text    = update.message.text.strip()
     chat_id = update.message.chat_id
-
     user_state = reseller_user_data.get(chat_id, {})
     state      = user_state.get("state")
     reseller   = get_reseller_by_chat_id(chat_id)
 
     if not reseller:
-        await update.message.reply_text("আগে /start দিয়ে register করো bhai!"); return
+        await update.message.reply_text("আগে /start দাও!"); return
 
     if state == "waiting_email":
         if "@" not in text or "." not in text:
-            await update.message.reply_text("❌ Valid email দাও!\nExample: example@gmail.com"); return
+            await update.message.reply_text("❌ Valid email দাও!"); return
         reseller_user_data[chat_id]["customer_email"] = text
         reseller_user_data[chat_id]["state"]           = "waiting_pay_choice"
         keyboard = [
-            [InlineKeyboardButton("💳 এখনই Payment করব", callback_data="res_pay_now")],
-            [InlineKeyboardButton("⏰ পরে Payment দিব",   callback_data="res_submit_order")]
+            [InlineKeyboardButton("💳 এখনই Payment", callback_data="res_pay_now")],
+            [InlineKeyboardButton("⏰ পরে Payment",   callback_data="res_submit_order")]
         ]
         await update.message.reply_text(
-            f"✅ Email নেওয়া হয়েছে!\n\n"
-            f"📧 {text}\n📦 {user_state['product_name']}\n💵 ৳{user_state['amount']}\n\n"
-            f"Payment এখন করবে নাকি পরে?",
+            f"✅ Email: `{text}`\n📦 {user_state['product_name']}\n💵 ৳{user_state['amount']}\n\nPayment এখন নাকি পরে?",
             reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
     elif state == "waiting_transaction":
         if len(text) < 6:
-            await update.message.reply_text("❌ TxnID minimum 6 character lagbe!"); return
-        method   = user_state.get("payment_method", "bkash")
-        product  = user_state.get("product_name")
-        email    = user_state.get("customer_email")
-        amount   = user_state.get("amount")
+            await update.message.reply_text("❌ TxnID minimum 6 character!"); return
+        method  = user_state.get("payment_method", "bkash")
+        product = user_state.get("product_name")
+        email   = user_state.get("customer_email")
+        amount  = user_state.get("amount")
         if not product or not email or not amount:
-            await update.message.reply_text("❌ Session data নেই। আবার /start দিয়ে নতুন order দাও।",
-                reply_markup=reseller_main_menu()); return
+            await update.message.reply_text("❌ Session শেষ। /start দাও।", reply_markup=reseller_main_menu()); return
         conn = get_db()
         try:
             rows = conn.run(
-                "INSERT INTO reseller_bot_orders "
-                "(reseller_id,reseller_code,product,customer_email,"
-                "transaction_id,payment_method,amount,status) "
+                "INSERT INTO reseller_bot_orders (reseller_id,reseller_code,product,customer_email,transaction_id,payment_method,amount,status) "
                 "VALUES (:rid,:code,:p,:e,:t,:m,:a,'pending') RETURNING id",
-                rid=reseller["id"], code=reseller["code"],
-                p=product, e=email, t=text, m=method, a=amount)
+                rid=reseller["id"], code=reseller["code"], p=product, e=email, t=text, m=method, a=amount)
         finally:
             conn.close()
         order_id = rows[0][0] if rows else None
@@ -2308,77 +1919,57 @@ async def reseller_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
             reseller_user_data[chat_id]["state"] = None
             await send_new_order_notification(order_id, reseller, product, email, amount, txn_id=text, payment_method=method)
             await update.message.reply_text(
-                f"✅ *Order Submit হয়েছে!*\n\n"
-                f"🆔 Order #{order_id}\n📦 {product}\n📧 {email}\n"
-                f"💳 TxnID: `{text}` ({method.upper()})\n💵 ৳{amount}\n\n"
-                f"⏳ Admin approve করলে account পাবে। Notify করব!",
+                f"✅ *Order #{order_id} Submit!*\n\n📦 {product}\n📧 {email}\n💳 TxnID: `{text}`\n\n⏳ Admin approve করবে।",
                 reply_markup=reseller_main_menu(), parse_mode="Markdown")
         else:
-            await update.message.reply_text("❌ Problem hoye geche. Abar try koro.")
+            await update.message.reply_text("❌ Problem! আবার try করো।")
         reseller_user_data.pop(chat_id, None)
 
     elif state == "waiting_due_txn":
         if len(text) < 6:
-            await update.message.reply_text("❌ TxnID minimum 6 character lagbe!"); return
+            await update.message.reply_text("❌ TxnID minimum 6 character!"); return
         order_id = user_state.get("paying_order_id")
         method   = user_state.get("payment_method", "bkash")
         if not order_id:
-            await update.message.reply_text("❌ Session data নেই। 'আমার Orders' থেকে আবার try করো.",
-                reply_markup=reseller_main_menu()); return
+            await update.message.reply_text("❌ Session শেষ।", reply_markup=reseller_main_menu()); return
         order = get_reseller_bot_order(order_id)
         conn  = get_db()
         try:
-            conn.run(
-                "UPDATE reseller_bot_orders SET transaction_id=:t, payment_method=:m WHERE id=:id",
-                t=text, m=method, id=order_id)
+            conn.run("UPDATE reseller_bot_orders SET transaction_id=:t, payment_method=:m WHERE id=:id",
+                     t=text, m=method, id=order_id)
         finally:
             conn.close()
         await send_payment_check_to_admin(order_id, reseller["code"], text, method, order["amount"])
         await update.message.reply_text(
-            f"✅ *Payment Info পাঠানো হয়েছে!*\n\n"
-            f"Order #{order_id}\n"
-            f"💳 {method.upper()} TxnID: `{text}`\n\n"
-            f"Admin verify করবে। Notify করব!",
+            f"✅ Payment info পাঠানো হয়েছে!\nOrder #{order_id} | TxnID: `{text}`\n\nAdmin verify করবে।",
             reply_markup=reseller_main_menu(), parse_mode="Markdown")
         reseller_user_data.pop(chat_id, None)
 
     else:
-        await update.message.reply_text("Menu থেকে কাজ করো বাই 👇", reply_markup=reseller_main_menu())
+        await update.message.reply_text("Menu থেকে কাজ করো 👇", reply_markup=reseller_main_menu())
 
 async def reseller_submit_order_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query   = update.callback_query
+    query     = update.callback_query
     await query.answer()
-    chat_id = query.message.chat_id
+    chat_id   = query.message.chat_id
     chat_data = reseller_user_data.get(chat_id, {})
     reseller  = get_reseller_by_chat_id(chat_id)
     if reseller and chat_data:
         conn = get_db()
         try:
             rows = conn.run(
-                "INSERT INTO reseller_bot_orders "
-                "(reseller_id,reseller_code,product,customer_email,"
-                "transaction_id,amount,status) "
+                "INSERT INTO reseller_bot_orders (reseller_id,reseller_code,product,customer_email,transaction_id,amount,status) "
                 "VALUES (:rid,:code,:p,:e,'LATER',:a,'pending') RETURNING id",
                 rid=reseller["id"], code=reseller["code"],
-                p=chat_data["product_name"],
-                e=chat_data.get("customer_email","N/A"),
-                a=chat_data["amount"])
+                p=chat_data["product_name"], e=chat_data.get("customer_email","N/A"), a=chat_data["amount"])
         finally:
             conn.close()
         order_id = rows[0][0] if rows else None
         if order_id:
-            await send_new_order_notification(
-                order_id, reseller,
-                chat_data["product_name"],
-                chat_data.get("customer_email","N/A"),
-                chat_data["amount"]
-            )
+            await send_new_order_notification(order_id, reseller, chat_data["product_name"],
+                                              chat_data.get("customer_email","N/A"), chat_data["amount"])
             await query.edit_message_text(
-                f"✅ *Order #{order_id} Submit হয়েছে!*\n\n"
-                f"📦 {chat_data['product_name']}\n"
-                f"📧 {chat_data.get('customer_email','N/A')}\n"
-                f"💵 ৳{chat_data['amount']}\n\n"
-                f"⏳ Admin approve করলে account পাবে।",
+                f"✅ *Order #{order_id} Submit!*\n\n📦 {chat_data['product_name']}\n📧 {chat_data.get('customer_email','N/A')}\n\n⏳ Admin approve করবে।",
                 reply_markup=reseller_main_menu(), parse_mode="Markdown")
         reseller_user_data.pop(chat_id, None)
 
@@ -2388,14 +1979,10 @@ async def reseller_submit_order_handler(update: Update, context: ContextTypes.DE
 def woocommerce_webhook():
     try:
         raw = request.data
-        if not raw:
-            return jsonify({"status": "ok"}), 200
-        try:
-            data = json.loads(raw)
-        except:
-            return jsonify({"status": "ok"}), 200
-        if not data:
-            return jsonify({"status": "ok"}), 200
+        if not raw: return jsonify({"status":"ok"}), 200
+        try: data = json.loads(raw)
+        except: return jsonify({"status":"ok"}), 200
+        if not data: return jsonify({"status":"ok"}), 200
 
         order_id       = str(data.get("id", "N/A"))
         customer       = data.get("billing", {})
@@ -2407,32 +1994,28 @@ def woocommerce_webhook():
 
         conn = get_db()
         try:
-            conn.run(
-                "INSERT INTO orders (woo_order_id,customer_name,customer_email,total,status,items) "
-                "VALUES (:o,:n,:e,:t,:s,:i)",
-                o=order_id, n=customer_name, e=customer_email, t=total, s=status, i=items_text)
+            conn.run("INSERT INTO orders (woo_order_id,customer_name,customer_email,total,status,items) VALUES (:o,:n,:e,:t,:s,:i)",
+                     o=order_id, n=customer_name, e=customer_email, t=total, s=status, i=items_text)
             conn.run("INSERT INTO income (amount,note,type) VALUES (:a,:n,'auto')",
                      a=total, n=f"WooCommerce Order #{order_id}")
         finally:
             conn.close()
 
-        msg = (f"🛍️ *নতুন WooCommerce Order!*\n\n"
-               f"📋 #{order_id}\n👤 {customer_name}\n📧 {customer_email}\n"
-               f"📦 {items_text}\n💵 ৳{total}\n📊 {status}")
+        msg = (f"🛍️ *নতুন WooCommerce Order!*\n\n📋 #{order_id}\n👤 {customer_name}\n"
+               f"📧 {customer_email}\n📦 {items_text}\n💵 ৳{total}\n📊 {status}")
         asyncio.run_coroutine_threadsafe(send_telegram_message(msg), main_loop)
-        return jsonify({"status": "ok"}), 200
+        return jsonify({"status":"ok"}), 200
     except Exception as e:
         logger.error(f"Webhook error: {e}")
-        return jsonify({"status": "error"}), 500
+        return jsonify({"status":"error"}), 500
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "running", "bkash": BKASH_NUMBER}), 200
+    return jsonify({"status":"running","bkash":BKASH_NUMBER}), 200
 
 async def send_telegram_message(message):
     from telegram import Bot
-    await Bot(token=BOT_TOKEN).send_message(
-        chat_id=CHAT_ID, text=message, parse_mode="Markdown")
+    await Bot(token=BOT_TOKEN).send_message(chat_id=CHAT_ID, text=message, parse_mode="Markdown")
 
 def run_flask():
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
@@ -2457,7 +2040,6 @@ async def main():
     main_app.add_handler(CommandHandler("listresellers",  listresellers_command))
     main_app.add_handler(CommandHandler("rsale",          resellersale_command))
     main_app.add_handler(CommandHandler("paylater",       paylater_command))
-    # ✅ নতুন subscription commands
     main_app.add_handler(CommandHandler("sub",            subscription_command))
     main_app.add_handler(CommandHandler("newsub",         new_subscription_command))
     main_app.add_handler(CallbackQueryHandler(button_handler))
