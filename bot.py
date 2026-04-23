@@ -37,6 +37,19 @@ NAGAD_NUMBER       = os.environ.get("NAGAD_NUMBER", "01997806925")
 WP_URL             = os.environ.get("WP_URL", "https://favouritedeals.online")
 WP_PAYLATER_SECRET = os.environ.get("WP_PAYLATER_SECRET", "")
 
+# =================== SUBSCRIPTION PRODUCTS ===================
+# WooCommerce product ID → display name
+SUBSCRIPTION_PRODUCTS = {
+    23269: "Claude Pro",
+    21203: "Grok Premium",
+    21147: "ChatGPT Plus",
+    21099: "Meta AI Pro",
+    21090: "YouTube Premium",
+    21069: "CapCut Pro",
+    21051: "Gemini Advanced",
+    21032: "Canva Pro (Edu)",
+}
+
 # Status constants
 STATUS_PENDING            = "pending"
 STATUS_ACCOUNT_DELIVERED  = "account_delivered"
@@ -440,31 +453,37 @@ def wc_put(endpoint, data):
 
 def fetch_subscription_products():
     """
-    WooCommerce থেকে সব subscription products fetch করো।
-    'subscriptions' category তে যা আছে সব আনবে।
+    Hardcoded product IDs থেকে WooCommerce এ real-time price fetch করো।
     """
-    try:
-        result = wc_get("products", {
-            "category": "329",  # Subscriptions category ID তোমার site এ
-            "per_page": 20,
-            "status": "publish",
-            "type": "variable"
-        })
-        if not result or isinstance(result, dict):
-            return []
-        products = []
-        for p in result:
-            products.append({
-                "id": p["id"],
-                "name": p["name"],
-                "price": p.get("price", "0"),
-                "variation_ids": p.get("variations", []),
-                "slug": p.get("slug", "")
-            })
-        return products
-    except Exception as e:
-        logger.error(f"Product fetch error: {e}")
-        return []
+    products = []
+    for product_id, display_name in SUBSCRIPTION_PRODUCTS.items():
+        try:
+            p = wc_get(f"products/{product_id}")
+            if p and "id" in p:
+                price_range = ""
+                if p.get("price"):
+                    price_range = f" (৳{p['price']}+)"
+                products.append({
+                    "id": p["id"],
+                    "name": display_name,
+                    "price": p.get("price", "0"),
+                    "price_range": price_range,
+                    "variation_ids": p.get("variations", []),
+                    "slug": p.get("slug", "")
+                })
+            else:
+                # API fail হলেও list এ রাখো
+                products.append({
+                    "id": product_id,
+                    "name": display_name,
+                    "price": "?",
+                    "price_range": "",
+                    "variation_ids": [],
+                    "slug": ""
+                })
+        except Exception as e:
+            logger.error(f"Product fetch error [{product_id}]: {e}")
+    return products
 
 def fetch_product_variations(product_id):
     """একটা product এর সব variations fetch করো"""
@@ -496,30 +515,10 @@ def fetch_product_variations(product_id):
 
 def create_order_with_variation(email, phone, password, product_id, variation_id, variation_attributes):
     """
-    নতুন customer + order create করো (variation সহ)
-    variation_attributes: dict like {"package-duration-and-type": "Lovable Pro 1M (105 Credits)"}
+    Guest order create করো — login ছাড়াই payment করা যাবে।
+    password টা bot এ দেখাবে কিন্তু WP account এর জন্য আলাদাভাবে set করতে হবে।
     """
-    # Step 1: Customer create
-    username = email.split("@")[0] + str(product_id)[-3:]
-    customer = wc_post_req("customers", {
-        "email": email,
-        "username": username,
-        "password": password,
-        "billing": {"email": email, "phone": phone},
-        "shipping": {"email": email}
-    })
-    if not customer or "id" not in customer:
-        # Customer হয়তো already exist করে, email দিয়ে খোঁজো
-        existing = wc_get("customers", {"email": email})
-        if existing and len(existing) > 0:
-            customer = existing[0]
-        else:
-            err = customer.get("message", "Customer create হয়নি") if customer else "Customer create হয়নি"
-            return None, err
-
-    customer_id = customer["id"]
-
-    # Step 2: Order create with variation
+    # Step 2: Order create — guest (customer_id=0) তাই login লাগবে না
     line_item = {
         "product_id": product_id,
         "quantity": 1
@@ -532,13 +531,31 @@ def create_order_with_variation(email, phone, password, product_id, variation_id
                 for k, v in variation_attributes.items()
             ]
 
+    first_name = email.split("@")[0]
+
     order = wc_post_req("orders", {
-        "customer_id": customer_id,
+        "customer_id": 0,  # Guest order — login লাগবে না!
         "payment_method": "bacs",
-        "payment_method_title": "Manual Payment",
+        "payment_method_title": "Manual Payment (bKash/Nagad)",
         "set_paid": False,
-        "billing": {"email": email, "phone": phone},
-        "line_items": [line_item]
+        "billing": {
+            "first_name": first_name,
+            "last_name": "Customer",
+            "email": email,
+            "phone": phone,
+            "address_1": "Bangladesh",
+            "city": "Dhaka",
+            "country": "BD"
+        },
+        "shipping": {
+            "first_name": first_name,
+            "last_name": "Customer",
+        },
+        "line_items": [line_item],
+        "meta_data": [
+            {"key": "_client_password", "value": password},
+            {"key": "_client_phone", "value": phone}
+        ]
     })
     if not order or "id" not in order:
         err = order.get("message", "Order create হয়নি") if order else "Order create হয়নি"
@@ -1498,7 +1515,8 @@ async def new_subscription_command(update: Update, context: ContextTypes.DEFAULT
 
     keyboard = []
     for p in products:
-        keyboard.append([InlineKeyboardButton(f"📦 {p['name']}", callback_data=f"newsub_prod_{p['id']}")])
+        price_label = f" — ৳{p['price']}+" if p.get("price") and p["price"] != "?" else ""
+        keyboard.append([InlineKeyboardButton(f"📦 {p['name']}{price_label}", callback_data=f"newsub_prod_{p['id']}")])
     keyboard.append([InlineKeyboardButton("🏠 Menu", callback_data="menu")])
 
     await update.message.reply_text(
