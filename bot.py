@@ -515,14 +515,44 @@ def fetch_product_variations(product_id):
 
 def create_order_with_variation(email, phone, password, product_id, variation_id, variation_attributes):
     """
-    Guest order create করো — login ছাড়াই payment করা যাবে।
-    password টা bot এ দেখাবে কিন্তু WP account এর জন্য আলাদাভাবে set করতে হবে।
+    Customer account create করো → Order create করো (subscription হবে)
+    Payment link এ auto-login token যোগ করা হবে — login ছাড়াই pay করা যাবে।
     """
-    # Step 2: Order create — guest (customer_id=0) তাই login লাগবে না
-    line_item = {
-        "product_id": product_id,
-        "quantity": 1
-    }
+    first_name = email.split("@")[0]
+
+    # Step 1: Customer create অথবা existing customer খোঁজো
+    customer_id = None
+
+    # আগে check করো customer exist করে কিনা
+    existing = wc_get("customers", {"email": email})
+    if existing and isinstance(existing, list) and len(existing) > 0:
+        customer_id = existing[0]["id"]
+        logger.info(f"Existing customer found: {customer_id} for {email}")
+    else:
+        # নতুন customer create করো
+        customer = wc_post_req("customers", {
+            "email": email,
+            "username": first_name + str(hash(email))[-4:],
+            "password": password,
+            "first_name": first_name,
+            "last_name": "Customer",
+            "billing": {
+                "first_name": first_name,
+                "last_name": "Customer",
+                "email": email,
+                "phone": phone,
+                "country": "BD"
+            }
+        })
+        if customer and "id" in customer:
+            customer_id = customer["id"]
+            logger.info(f"New customer created: {customer_id} for {email}")
+        else:
+            err = customer.get("message", "Customer create হয়নি") if customer else "Customer create হয়নি"
+            return None, err
+
+    # Step 2: Order create — customer_id দিলে subscription create হবে!
+    line_item = {"product_id": product_id, "quantity": 1}
     if variation_id:
         line_item["variation_id"] = variation_id
         if variation_attributes:
@@ -531,10 +561,8 @@ def create_order_with_variation(email, phone, password, product_id, variation_id
                 for k, v in variation_attributes.items()
             ]
 
-    first_name = email.split("@")[0]
-
     order = wc_post_req("orders", {
-        "customer_id": 0,  # Guest order — login লাগবে না!
+        "customer_id": customer_id,
         "payment_method": "bacs",
         "payment_method_title": "Manual Payment (bKash/Nagad)",
         "set_paid": False,
@@ -543,20 +571,16 @@ def create_order_with_variation(email, phone, password, product_id, variation_id
             "last_name": "Customer",
             "email": email,
             "phone": phone,
-            "address_1": "Bangladesh",
-            "city": "Dhaka",
             "country": "BD"
-        },
-        "shipping": {
-            "first_name": first_name,
-            "last_name": "Customer",
         },
         "line_items": [line_item],
         "meta_data": [
+            {"key": "_client_phone",    "value": phone},
             {"key": "_client_password", "value": password},
-            {"key": "_client_phone", "value": phone}
+            {"key": "_bot_order",       "value": "yes"}
         ]
     })
+
     if not order or "id" not in order:
         err = order.get("message", "Order create হয়নি") if order else "Order create হয়নি"
         return None, err
@@ -591,10 +615,29 @@ def create_renewal_order(sub_id):
         logger.error(f"Renewal order error: {e}")
         return None
 
-def generate_payment_link(order_id, order_key=None):
+def generate_payment_link(order_id, order_key=None, email=None):
+    """
+    Auto-login payment link generate করো।
+    Client login ছাড়াই pay করতে পারবে।
+    """
+    # WordPress autologin endpoint call করো
+    if email:
+        try:
+            resp = req.post(
+                f"{WP_URL}/wp-json/fdbot/v1/autologin-link",
+                headers={"X-FD-Secret": WP_PAYLATER_SECRET or "changeme123"},
+                json={"order_id": order_id, "email": email},
+                timeout=10
+            )
+            data = resp.json()
+            if data.get("success") and data.get("autologin_url"):
+                return data["autologin_url"]
+        except Exception as e:
+            logger.error(f"Autologin link error: {e}")
+
+    # Fallback — normal payment link
     if order_key:
         return f"{WP_URL}/checkout/order-pay/{order_id}/?pay_for_order=true&key={order_key}"
-    # order_key না থাকলে API থেকে নাও
     order = wc_get(f"orders/{order_id}")
     if order and order.get("order_key"):
         key = order["order_key"]
@@ -1024,7 +1067,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         order_id  = order["id"]
         order_key = order.get("order_key", "")
-        pay_link  = generate_payment_link(order_id, order_key)
+        pay_link  = generate_payment_link(order_id, order_key, email=email)
 
         await query.edit_message_text(
             f"✅ *নতুন Client + Order Create হয়েছে!*\n\n"
@@ -1063,7 +1106,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if renewal and "id" in renewal:
             order_id  = renewal["id"]
             order_key = renewal.get("order_key", "")
-            pay_link  = generate_payment_link(order_id, order_key)
+            # Sub এর billing email নাও
+            sub_data  = wc_get(f"subscriptions/{sub_id}")
+            sub_email = sub_data.get("billing", {}).get("email") if sub_data else None
+            pay_link  = generate_payment_link(order_id, order_key, email=sub_email)
             await query.edit_message_text(
                 f"✅ *Payment Link Ready!*\n\nSubscription #{sub_id} | Order #{order_id}\n\n"
                 f"👇 Client কে পাঠাও:\n`{pay_link}`",
