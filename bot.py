@@ -513,10 +513,8 @@ def fetch_product_variations(product_id):
         logger.error(f"Variation fetch error for product {product_id}: {e}")
         return []
 
-def get_or_create_customer(email, phone, password):
+def get_or_create_customer(email, phone, first_name="Customer", last_name="Customer"):
     """Customer নাও অথবা বানাও"""
-    first_name = email.split("@")[0]
-
     # Already exist করে কিনা check করো
     existing = wc_get("customers", {"email": email})
     if existing and isinstance(existing, list) and len(existing) > 0:
@@ -524,16 +522,16 @@ def get_or_create_customer(email, phone, password):
         return existing[0]["id"], None
 
     # নতুন customer create করো
-    username = first_name + str(abs(hash(email)))[-4:]
+    username = (first_name + str(abs(hash(email)))[-4:]).lower().replace(" ", "")
     customer = wc_post_req("customers", {
         "email":      email,
         "username":   username,
-        "password":   password,
+        "password":   "Temp@" + str(abs(hash(email)))[-6:],  # temp password
         "first_name": first_name,
-        "last_name":  "Customer",
+        "last_name":  last_name,
         "billing": {
             "first_name": first_name,
-            "last_name":  "Customer",
+            "last_name":  last_name,
             "email":      email,
             "phone":      phone,
             "country":    "BD"
@@ -547,14 +545,12 @@ def get_or_create_customer(email, phone, password):
     return None, err
 
 
-def create_subscription_directly(email, phone, password, product_id, variation_id, variation_attributes):
+def create_subscription_directly(email, phone, first_name, last_name, product_id, variation_id, variation_attributes, coupon=None):
     """
     সরাসরি WooCommerce Subscription create করো।
     Payment হওয়ার পর manually activate করতে হবে।
     """
-    first_name  = email.split("@")[0]
-    customer_id, err = get_or_create_customer(email, phone, password)
-
+    customer_id, err = get_or_create_customer(email, phone, first_name, last_name)
     if err:
         return None, err
 
@@ -568,8 +564,8 @@ def create_subscription_directly(email, phone, password, product_id, variation_i
                 for k, v in variation_attributes.items()
             ]
 
-    # Subscription create করো
-    subscription = wc_post_req("subscriptions", {
+    # Subscription body
+    sub_body = {
         "customer_id":          customer_id,
         "status":               "pending",
         "billing_period":       "month",
@@ -578,7 +574,7 @@ def create_subscription_directly(email, phone, password, product_id, variation_i
         "payment_method_title": "Manual Payment (bKash/Nagad)",
         "billing": {
             "first_name": first_name,
-            "last_name":  "Customer",
+            "last_name":  last_name,
             "email":      email,
             "phone":      phone,
             "country":    "BD"
@@ -586,23 +582,30 @@ def create_subscription_directly(email, phone, password, product_id, variation_i
         "line_items": [line_item],
         "meta_data": [
             {"key": "_client_phone",    "value": phone},
-            {"key": "_client_password", "value": password},
+            {"key": "_client_name",     "value": f"{first_name} {last_name}"},
             {"key": "_bot_order",       "value": "yes"}
         ]
-    })
+    }
+
+    # Coupon থাকলে যোগ করো
+    if coupon:
+        sub_body["coupon_lines"] = [{"code": coupon}]
+
+    subscription = wc_post_req("subscriptions", sub_body)
 
     if not subscription or "id" not in subscription:
-        # Subscription API কাজ না করলে order দিয়ে try করো
+        # Fallback — normal order
         logger.warning("Subscription API failed, trying order API...")
-        return create_order_fallback(email, phone, password, product_id,
-                                     variation_id, variation_attributes,
-                                     customer_id, first_name)
+        return create_order_fallback(
+            email, phone, first_name, last_name,
+            product_id, variation_id, variation_attributes,
+            customer_id, coupon)
 
     return subscription, None
 
 
-def create_order_fallback(email, phone, password, product_id, variation_id,
-                          variation_attributes, customer_id, first_name):
+def create_order_fallback(email, phone, first_name, last_name, product_id,
+                          variation_id, variation_attributes, customer_id, coupon=None):
     """Subscription API কাজ না করলে normal order create করো"""
     line_item = {"product_id": product_id, "quantity": 1}
     if variation_id:
@@ -613,26 +616,31 @@ def create_order_fallback(email, phone, password, product_id, variation_id,
                 for k, v in variation_attributes.items()
             ]
 
-    order = wc_post_req("orders", {
+    order_body = {
         "customer_id":          customer_id,
         "payment_method":       "bacs",
         "payment_method_title": "Manual Payment (bKash/Nagad)",
         "set_paid":             False,
         "billing": {
             "first_name": first_name,
-            "last_name":  "Customer",
+            "last_name":  last_name,
             "email":      email,
             "phone":      phone,
             "country":    "BD"
         },
         "line_items": [line_item],
         "meta_data": [
-            {"key": "_client_phone",    "value": phone},
-            {"key": "_client_password", "value": password},
-            {"key": "_bot_order",       "value": "yes"},
+            {"key": "_client_phone",      "value": phone},
+            {"key": "_client_name",       "value": f"{first_name} {last_name}"},
+            {"key": "_bot_order",         "value": "yes"},
             {"key": "_is_fallback_order", "value": "yes"}
         ]
-    })
+    }
+
+    if coupon:
+        order_body["coupon_lines"] = [{"code": coupon}]
+
+    order = wc_post_req("orders", order_body)
 
     if not order or "id" not in order:
         err = order.get("message", "Order create হয়নি") if order else "Order/Subscription create হয়নি"
@@ -1076,17 +1084,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         product_id = int(parts[2])
         var_id     = int(parts[3])
 
-        email    = context.user_data.get("newsub_email")
-        phone    = context.user_data.get("newsub_phone")
-        password = context.user_data.get("newsub_password")
+        email      = context.user_data.get("newsub_email")
+        phone      = context.user_data.get("newsub_phone")
+        first_name = context.user_data.get("newsub_first_name", "Customer")
+        last_name  = context.user_data.get("newsub_last_name", "Customer")
+        full_name  = context.user_data.get("newsub_full_name", "Customer")
+        coupon     = context.user_data.get("newsub_coupon")
 
         if not email:
             await query.edit_message_text(
-                "❌ Session শেষ। আবার `/newsub email phone password` দাও।",
+                "❌ Session শেষ। আবার `/newsub` দাও।",
                 parse_mode="Markdown")
             return
 
-        await query.edit_message_text(f"⏳ `{email}` এর জন্য order create করছি...")
+        await query.edit_message_text(f"⏳ `{email}` এর জন্য subscription create করছি...")
 
         # Variation info নাও
         variations = fetch_product_variations(product_id)
@@ -1103,12 +1114,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             variation_attributes[selected_var["attribute_slug"]] = selected_var["attribute_option"]
 
         order, error = create_subscription_directly(
-            email, phone, password, product_id, var_id, variation_attributes)
+            email, phone, first_name, last_name,
+            product_id, var_id, variation_attributes, coupon)
 
         # Context clear
         context.user_data.pop("newsub_email", None)
         context.user_data.pop("newsub_phone", None)
-        context.user_data.pop("newsub_password", None)
+        context.user_data.pop("newsub_first_name", None)
+        context.user_data.pop("newsub_last_name", None)
+        context.user_data.pop("newsub_full_name", None)
+        context.user_data.pop("newsub_coupon", None)
         context.user_data.pop("newsub_product_id", None)
 
         if error:
@@ -1120,11 +1135,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         order_id  = order["id"]
         order_key = order.get("order_key", "")
-        pay_link  = generate_payment_link(order_id, order_key, email=email)
 
-        # Subscription নাকি Order?
-        is_sub = "/subscriptions/" in str(order.get("_links", {}).get("self", [{}])[0].get("href", ""))
-        type_label = "Subscription" if is_sub else "Order"
+        # Subscription নাকি Order check করো
+        is_sub = "/subscriptions/" in str(
+            order.get("_links", {}).get("self", [{}])[0].get("href", ""))
+
+        # Payment link generate করো
+        if is_sub:
+            # Subscription এর initial order এর link নাও
+            try:
+                sub_orders_resp = req.get(
+                    f"{WP_URL}/wp-json/wc/v3/subscriptions/{order_id}/orders",
+                    auth=(WC_KEY, WC_SECRET), timeout=15)
+                sub_orders = sub_orders_resp.json()
+                if isinstance(sub_orders, list) and len(sub_orders) > 0:
+                    init_order    = sub_orders[0]
+                    init_order_id = init_order["id"]
+                    init_order_key = init_order.get("order_key", "")
+                    pay_link = generate_payment_link(init_order_id, init_order_key, email=email)
+                else:
+                    pay_link = f"{WP_URL}/my-account/view-subscription/{order_id}/"
+            except Exception as e:
+                logger.error(f"Sub initial order error: {e}")
+                pay_link = f"{WP_URL}/my-account/view-subscription/{order_id}/"
+        else:
+            pay_link = generate_payment_link(order_id, order_key, email=email)
+
+        type_label   = "Subscription" if is_sub else "Order"
+        coupon_text  = f"\n🎟️ Coupon: `{coupon}`" if coupon else ""
 
         keyboard = [
             [InlineKeyboardButton(
@@ -1136,11 +1174,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(
             f"✅ *{type_label} #{order_id} Create হয়েছে!*\n\n"
+            f"👤 Name: `{full_name}`\n"
             f"📧 Email: `{email}`\n"
             f"📱 Phone: `{phone}`\n"
-            f"🔑 Password: `{password}`\n"
             f"📦 Plan: {selected_var['name']}\n"
-            f"💵 Amount: ৳{selected_var['price']}\n\n"
+            f"💵 Amount: ৳{selected_var['price']}{coupon_text}\n\n"
             f"👇 Payment link client কে পাঠাও:\n`{pay_link}`\n\n"
             f"_Client pay করার পর নিচের button press করো_ 👇",
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -1629,29 +1667,87 @@ async def subscription_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def new_subscription_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/newsub email phone password — dynamic product+variation select করে order create করো"""
-    if len(context.args) < 3:
+    """
+    /newsub email "Full Name" phone [coupon]
+    Example: /newsub john@gmail.com "John Doe" 01712345678
+    Example with coupon: /newsub john@gmail.com "John Doe" 01712345678 SAVE20
+    """
+    # Raw text থেকে parse করো (quoted name support)
+    raw = update.message.text.split(None, 1)
+    if len(raw) < 2:
         await update.message.reply_text(
-            "📋 Format:\n`/newsub email phone password`\n\nExample:\n`/newsub john@gmail.com 01712345678 Pass@123`",
+            '📋 Format:\n`/newsub email "Full Name" phone`\n\n'
+            'Example:\n`/newsub john@gmail.com "John Doe" 01712345678`\n\n'
+            'Coupon সহ:\n`/newsub john@gmail.com "John Doe" 01712345678 SAVE20`',
             parse_mode="Markdown"); return
 
-    email    = context.args[0].lower().strip()
-    phone    = context.args[1].strip()
-    password = context.args[2].strip()
+    args_str = raw[1].strip()
+
+    # Email নাও (প্রথম word)
+    parts = args_str.split(None, 1)
+    if len(parts) < 2:
+        await update.message.reply_text(
+            '❌ Format ঠিক নেই!\n\n`/newsub email "Full Name" phone`',
+            parse_mode="Markdown"); return
+
+    email    = parts[0].lower().strip()
+    rest     = parts[1].strip()
+
+    # Quoted name parse করো
+    if rest.startswith('"'):
+        end_quote = rest.find('"', 1)
+        if end_quote == -1:
+            await update.message.reply_text('❌ Name এর শেষে `"` দাও!', parse_mode="Markdown"); return
+        full_name  = rest[1:end_quote].strip()
+        after_name = rest[end_quote+1:].strip().split()
+    else:
+        # Quote ছাড়া হলে প্রথম word name, বাকি phone+coupon
+        after_name_parts = rest.split()
+        full_name  = after_name_parts[0] if after_name_parts else ""
+        after_name = after_name_parts[1:] if len(after_name_parts) > 1 else []
+
+    if not after_name:
+        await update.message.reply_text(
+            '❌ Phone number দাও!\n\n`/newsub email "Full Name" phone`',
+            parse_mode="Markdown"); return
+
+    phone  = after_name[0].strip()
+    coupon = after_name[1].strip().upper() if len(after_name) > 1 else None
+
+    # Validate
+    if "@" not in email or "." not in email:
+        await update.message.reply_text("❌ Valid email দাও!"); return
+    if len(phone) < 10:
+        await update.message.reply_text("❌ Valid phone number দাও!"); return
+
+    # Name split করো
+    name_parts = full_name.split(None, 1)
+    first_name = name_parts[0] if name_parts else email.split("@")[0]
+    last_name  = name_parts[1] if len(name_parts) > 1 else "Customer"
 
     # Context এ save করো
-    context.user_data["newsub_email"]    = email
-    context.user_data["newsub_phone"]    = phone
-    context.user_data["newsub_password"] = password
+    context.user_data["newsub_email"]      = email
+    context.user_data["newsub_phone"]      = phone
+    context.user_data["newsub_first_name"] = first_name
+    context.user_data["newsub_last_name"]  = last_name
+    context.user_data["newsub_full_name"]  = full_name
+    context.user_data["newsub_coupon"]     = coupon
 
-    await update.message.reply_text(f"✅ Client details নেওয়া হয়েছে!\n📧 {email}\n📱 {phone}\n\n⏳ Products fetch করছি...")
+    coupon_text = f"\n🎟️ Coupon: `{coupon}`" if coupon else ""
+
+    await update.message.reply_text(
+        f"✅ Client details নেওয়া হয়েছে!\n\n"
+        f"👤 Name: `{full_name}`\n"
+        f"📧 Email: `{email}`\n"
+        f"📱 Phone: `{phone}`{coupon_text}\n\n"
+        f"⏳ Products fetch করছি...",
+        parse_mode="Markdown")
 
     # WooCommerce থেকে subscription products আনো
     products = fetch_subscription_products()
 
     if not products:
-        await update.message.reply_text(
-            "❌ কোনো subscription product পাওয়া যায়নি।\n\nWooCommerce এ 'Subscriptions' category তে product আছে কিনা দেখো।")
+        await update.message.reply_text("❌ কোনো subscription product পাওয়া যায়নি।")
         return
 
     keyboard = []
@@ -1661,8 +1757,7 @@ async def new_subscription_command(update: Update, context: ContextTypes.DEFAULT
     keyboard.append([InlineKeyboardButton("🏠 Menu", callback_data="menu")])
 
     await update.message.reply_text(
-        f"🛍️ *কোন product এর subscription create করবে?*\n\n"
-        f"_(WooCommerce থেকে real-time fetch করা হয়েছে)_",
+        f"🛍️ *কোন product এর subscription create করবে?*",
         reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def listresellers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
