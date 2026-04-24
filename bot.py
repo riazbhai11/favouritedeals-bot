@@ -513,45 +513,97 @@ def fetch_product_variations(product_id):
         logger.error(f"Variation fetch error for product {product_id}: {e}")
         return []
 
-def create_order_with_variation(email, phone, password, product_id, variation_id, variation_attributes):
-    """
-    Customer account create করো → Order create করো (subscription হবে)
-    Payment link এ auto-login token যোগ করা হবে — login ছাড়াই pay করা যাবে।
-    """
+def get_or_create_customer(email, phone, password):
+    """Customer নাও অথবা বানাও"""
     first_name = email.split("@")[0]
 
-    # Step 1: Customer create অথবা existing customer খোঁজো
-    customer_id = None
-
-    # আগে check করো customer exist করে কিনা
+    # Already exist করে কিনা check করো
     existing = wc_get("customers", {"email": email})
     if existing and isinstance(existing, list) and len(existing) > 0:
-        customer_id = existing[0]["id"]
-        logger.info(f"Existing customer found: {customer_id} for {email}")
-    else:
-        # নতুন customer create করো
-        customer = wc_post_req("customers", {
-            "email": email,
-            "username": first_name + str(hash(email))[-4:],
-            "password": password,
-            "first_name": first_name,
-            "last_name": "Customer",
-            "billing": {
-                "first_name": first_name,
-                "last_name": "Customer",
-                "email": email,
-                "phone": phone,
-                "country": "BD"
-            }
-        })
-        if customer and "id" in customer:
-            customer_id = customer["id"]
-            logger.info(f"New customer created: {customer_id} for {email}")
-        else:
-            err = customer.get("message", "Customer create হয়নি") if customer else "Customer create হয়নি"
-            return None, err
+        logger.info(f"Existing customer: {existing[0]['id']} for {email}")
+        return existing[0]["id"], None
 
-    # Step 2: Order create — customer_id দিলে subscription create হবে!
+    # নতুন customer create করো
+    username = first_name + str(abs(hash(email)))[-4:]
+    customer = wc_post_req("customers", {
+        "email":      email,
+        "username":   username,
+        "password":   password,
+        "first_name": first_name,
+        "last_name":  "Customer",
+        "billing": {
+            "first_name": first_name,
+            "last_name":  "Customer",
+            "email":      email,
+            "phone":      phone,
+            "country":    "BD"
+        }
+    })
+    if customer and "id" in customer:
+        logger.info(f"New customer created: {customer['id']} for {email}")
+        return customer["id"], None
+
+    err = customer.get("message", "Customer create হয়নি") if customer else "Customer create হয়নি"
+    return None, err
+
+
+def create_subscription_directly(email, phone, password, product_id, variation_id, variation_attributes):
+    """
+    সরাসরি WooCommerce Subscription create করো।
+    Payment হওয়ার পর manually activate করতে হবে।
+    """
+    first_name  = email.split("@")[0]
+    customer_id, err = get_or_create_customer(email, phone, password)
+
+    if err:
+        return None, err
+
+    # Line item
+    line_item = {"product_id": product_id, "quantity": 1}
+    if variation_id:
+        line_item["variation_id"] = variation_id
+        if variation_attributes:
+            line_item["meta_data"] = [
+                {"key": f"attribute_{k}", "value": v}
+                for k, v in variation_attributes.items()
+            ]
+
+    # Subscription create করো
+    subscription = wc_post_req("subscriptions", {
+        "customer_id":          customer_id,
+        "status":               "pending",
+        "billing_period":       "month",
+        "billing_interval":     1,
+        "payment_method":       "bacs",
+        "payment_method_title": "Manual Payment (bKash/Nagad)",
+        "billing": {
+            "first_name": first_name,
+            "last_name":  "Customer",
+            "email":      email,
+            "phone":      phone,
+            "country":    "BD"
+        },
+        "line_items": [line_item],
+        "meta_data": [
+            {"key": "_client_phone",    "value": phone},
+            {"key": "_client_password", "value": password},
+            {"key": "_bot_order",       "value": "yes"}
+        ]
+    })
+
+    if not subscription or "id" not in subscription:
+        # Subscription API কাজ না করলে order দিয়ে try করো
+        logger.warning("Subscription API failed, trying order API...")
+        return create_order_fallback(email, phone, password, product_id,
+                                     variation_id, variation_attributes,
+                                     customer_id, first_name)
+
+    return subscription, None
+
+
+def create_order_fallback(email, phone, password, product_id, variation_id,
+                          variation_attributes, customer_id, first_name):
+    """Subscription API কাজ না করলে normal order create করো"""
     line_item = {"product_id": product_id, "quantity": 1}
     if variation_id:
         line_item["variation_id"] = variation_id
@@ -562,27 +614,28 @@ def create_order_with_variation(email, phone, password, product_id, variation_id
             ]
 
     order = wc_post_req("orders", {
-        "customer_id": customer_id,
-        "payment_method": "bacs",
+        "customer_id":          customer_id,
+        "payment_method":       "bacs",
         "payment_method_title": "Manual Payment (bKash/Nagad)",
-        "set_paid": False,
+        "set_paid":             False,
         "billing": {
             "first_name": first_name,
-            "last_name": "Customer",
-            "email": email,
-            "phone": phone,
-            "country": "BD"
+            "last_name":  "Customer",
+            "email":      email,
+            "phone":      phone,
+            "country":    "BD"
         },
         "line_items": [line_item],
         "meta_data": [
             {"key": "_client_phone",    "value": phone},
             {"key": "_client_password", "value": password},
-            {"key": "_bot_order",       "value": "yes"}
+            {"key": "_bot_order",       "value": "yes"},
+            {"key": "_is_fallback_order", "value": "yes"}
         ]
     })
 
     if not order or "id" not in order:
-        err = order.get("message", "Order create হয়নি") if order else "Order create হয়নি"
+        err = order.get("message", "Order create হয়নি") if order else "Order/Subscription create হয়নি"
         return None, err
 
     return order, None
@@ -1049,7 +1102,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if selected_var.get("attribute_slug") and selected_var.get("attribute_option"):
             variation_attributes[selected_var["attribute_slug"]] = selected_var["attribute_option"]
 
-        order, error = create_order_with_variation(
+        order, error = create_subscription_directly(
             email, phone, password, product_id, var_id, variation_attributes)
 
         # Context clear
@@ -1060,7 +1113,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if error:
             await query.edit_message_text(
-                f"❌ Error: {error}\n\nEmail already registered থাকলে সরাসরি WooCommerce dashboard এ করো।",
+                f"❌ Error: {error}",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
                 parse_mode="Markdown")
             return
@@ -1069,18 +1122,60 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_key = order.get("order_key", "")
         pay_link  = generate_payment_link(order_id, order_key, email=email)
 
+        # Subscription নাকি Order?
+        is_sub = "/subscriptions/" in str(order.get("_links", {}).get("self", [{}])[0].get("href", ""))
+        type_label = "Subscription" if is_sub else "Order"
+
+        keyboard = [
+            [InlineKeyboardButton(
+                f"✅ #{order_id} Activate করো (Payment নেওয়ার পর)",
+                callback_data=f"sub_activate_{order_id}_{'sub' if is_sub else 'order'}"
+            )],
+            [InlineKeyboardButton("🏠 Menu", callback_data="menu")]
+        ]
+
         await query.edit_message_text(
-            f"✅ *নতুন Client + Order Create হয়েছে!*\n\n"
+            f"✅ *{type_label} #{order_id} Create হয়েছে!*\n\n"
             f"📧 Email: `{email}`\n"
             f"📱 Phone: `{phone}`\n"
             f"🔑 Password: `{password}`\n"
             f"📦 Plan: {selected_var['name']}\n"
             f"💵 Amount: ৳{selected_var['price']}\n\n"
-            f"📋 Order #{order_id}\n\n"
-            f"👇 Payment link (client কে পাঠাও):\n`{pay_link}`\n\n"
-            f"Client pay করলে subscription auto active হবে।",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
+            f"👇 Payment link client কে পাঠাও:\n`{pay_link}`\n\n"
+            f"_Client pay করার পর নিচের button press করো_ 👇",
+            reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown")
+        return
+
+    # ══════════════════════════════════════════
+    # ✅ Subscription/Order Activate button
+    # ══════════════════════════════════════════
+
+    elif data.startswith("sub_activate_"):
+        parts   = data.split("_")
+        item_id = int(parts[2])
+        is_sub  = len(parts) > 3 and parts[3] == "sub"
+
+        await query.edit_message_text(f"⏳ #{item_id} activate করছি...")
+
+        if is_sub:
+            # Subscription directly activate করো
+            result = wc_put(f"subscriptions/{item_id}", {"status": "active"})
+        else:
+            # Order complete করো → subscription auto create হবে
+            result = wc_put(f"orders/{item_id}", {"status": "completed"})
+
+        if result and result.get("status") in ["active", "completed"]:
+            await query.edit_message_text(
+                f"✅ *#{item_id} Activated!*\n\nClient এর subscription চালু হয়ে গেছে। 🎉",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
+                parse_mode="Markdown")
+        else:
+            await query.edit_message_text(
+                f"❌ Activate হয়নি।\n\nWooCommerce dashboard এ manually করো:\n"
+                f"{'Subscriptions' if is_sub else 'Orders'} → #{item_id} → Status: Active/Completed",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
+                parse_mode="Markdown")
         return
 
     # ══════════════════════════════════════════
