@@ -38,7 +38,6 @@ WP_URL             = os.environ.get("WP_URL", "https://favouritedeals.online")
 WP_PAYLATER_SECRET = os.environ.get("WP_PAYLATER_SECRET", "")
 
 # =================== SUBSCRIPTION PRODUCTS ===================
-# WooCommerce product ID → display name
 SUBSCRIPTION_PRODUCTS = {
     23269: "Claude Pro",
     21203: "Grok Premium",
@@ -50,12 +49,11 @@ SUBSCRIPTION_PRODUCTS = {
     21032: "Canva Pro (Edu)",
 }
 
-# Status constants
-STATUS_PENDING            = "pending"
-STATUS_ACCOUNT_DELIVERED  = "account_delivered"
-STATUS_PAYMENT_DUE        = "payment_due"
-STATUS_COMPLETED          = "completed"
-STATUS_REJECTED           = "rejected"
+STATUS_PENDING           = "pending"
+STATUS_ACCOUNT_DELIVERED = "account_delivered"
+STATUS_PAYMENT_DUE       = "payment_due"
+STATUS_COMPLETED         = "completed"
+STATUS_REJECTED          = "rejected"
 
 app       = Flask(__name__)
 main_loop = None
@@ -94,14 +92,12 @@ def setup_db():
             status         VARCHAR(50),
             items          TEXT,
             created_at     TIMESTAMP DEFAULT NOW())""")
-
         conn.run("""CREATE TABLE IF NOT EXISTS income (
             id         SERIAL PRIMARY KEY,
             amount     DECIMAL(10,2),
             note       TEXT,
             type       VARCHAR(20) DEFAULT 'manual',
             created_at TIMESTAMP DEFAULT NOW())""")
-
         conn.run("""CREATE TABLE IF NOT EXISTS resellers (
             id               SERIAL PRIMARY KEY,
             name             VARCHAR(200),
@@ -109,7 +105,6 @@ def setup_db():
             reseller_code    VARCHAR(20),
             telegram_chat_id VARCHAR(50),
             created_at       TIMESTAMP DEFAULT NOW())""")
-
         conn.run("""CREATE TABLE IF NOT EXISTS reseller_orders (
             id          SERIAL PRIMARY KEY,
             reseller_id INTEGER REFERENCES resellers(id),
@@ -117,7 +112,6 @@ def setup_db():
             quantity    INTEGER,
             price       DECIMAL(10,2),
             created_at  TIMESTAMP DEFAULT NOW())""")
-
         conn.run("""CREATE TABLE IF NOT EXISTS reseller_bot_orders (
             id                 SERIAL PRIMARY KEY,
             reseller_id        INTEGER REFERENCES resellers(id),
@@ -134,26 +128,23 @@ def setup_db():
             payment_due_at         TIMESTAMP,
             completed_at           TIMESTAMP,
             created_at         TIMESTAMP DEFAULT NOW())""")
-
         for col, definition in [
-            ("payment_method",          "VARCHAR(20) DEFAULT 'bkash'"),
-            ("payment_reminder_count",  "INTEGER DEFAULT 0"),
-            ("account_delivered_at",    "TIMESTAMP"),
-            ("payment_due_at",          "TIMESTAMP"),
-            ("completed_at",            "TIMESTAMP"),
+            ("payment_method",         "VARCHAR(20) DEFAULT 'bkash'"),
+            ("payment_reminder_count", "INTEGER DEFAULT 0"),
+            ("account_delivered_at",   "TIMESTAMP"),
+            ("payment_due_at",         "TIMESTAMP"),
+            ("completed_at",           "TIMESTAMP"),
         ]:
             try:
                 conn.run(f"ALTER TABLE reseller_bot_orders ADD COLUMN IF NOT EXISTS {col} {definition}")
             except Exception:
                 pass
-
         conn.run("""CREATE TABLE IF NOT EXISTS bot_memory (
             id         SERIAL PRIMARY KEY,
             key        VARCHAR(200) UNIQUE,
             value      TEXT,
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW())""")
-
     finally:
         conn.close()
     logger.info("✅ Database setup complete!")
@@ -452,41 +443,24 @@ def wc_put(endpoint, data):
 # =================== DYNAMIC PRODUCT FETCHING ===================
 
 def fetch_subscription_products():
-    """
-    Hardcoded product IDs থেকে WooCommerce এ real-time price fetch করো।
-    """
     products = []
     for product_id, display_name in SUBSCRIPTION_PRODUCTS.items():
         try:
             p = wc_get(f"products/{product_id}")
             if p and "id" in p:
-                price_range = ""
-                if p.get("price"):
-                    price_range = f" (৳{p['price']}+)"
                 products.append({
-                    "id": p["id"],
-                    "name": display_name,
+                    "id": p["id"], "name": display_name,
                     "price": p.get("price", "0"),
-                    "price_range": price_range,
                     "variation_ids": p.get("variations", []),
                     "slug": p.get("slug", "")
                 })
             else:
-                # API fail হলেও list এ রাখো
-                products.append({
-                    "id": product_id,
-                    "name": display_name,
-                    "price": "?",
-                    "price_range": "",
-                    "variation_ids": [],
-                    "slug": ""
-                })
+                products.append({"id": product_id, "name": display_name, "price": "?", "variation_ids": [], "slug": ""})
         except Exception as e:
             logger.error(f"Product fetch error [{product_id}]: {e}")
     return products
 
 def fetch_product_variations(product_id):
-    """একটা product এর সব variations fetch করো"""
     try:
         result = wc_get(f"products/{product_id}/variations", {"per_page": 20})
         if not result or isinstance(result, dict):
@@ -497,7 +471,6 @@ def fetch_product_variations(product_id):
                 attr_name = ""
                 if v.get("attributes"):
                     attr_name = v["attributes"][0].get("option", "")
-                # Clean up HTML from description
                 desc = re.sub(r'<[^>]+>', '', v.get("description", "")).strip()
                 desc = desc[:100] if len(desc) > 100 else desc
                 variations.append({
@@ -514,120 +487,59 @@ def fetch_product_variations(product_id):
         return []
 
 def get_or_create_customer(email, phone, first_name="Customer", last_name="Customer"):
-    """Customer নাও অথবা বানাও"""
-    # Already exist করে কিনা check করো
     existing = wc_get("customers", {"email": email})
     if existing and isinstance(existing, list) and len(existing) > 0:
-        logger.info(f"Existing customer: {existing[0]['id']} for {email}")
         return existing[0]["id"], None
-
-    # নতুন customer create করো
     username = (first_name + str(abs(hash(email)))[-4:]).lower().replace(" ", "")
     customer = wc_post_req("customers", {
-        "email":      email,
-        "username":   username,
-        "password":   "Temp@" + str(abs(hash(email)))[-6:],  # temp password
-        "first_name": first_name,
-        "last_name":  last_name,
-        "billing": {
-            "first_name": first_name,
-            "last_name":  last_name,
-            "email":      email,
-            "phone":      phone,
-            "country":    "BD"
-        }
+        "email": email, "username": username,
+        "password": "Temp@" + str(abs(hash(email)))[-6:],
+        "first_name": first_name, "last_name": last_name,
+        "billing": {"first_name": first_name, "last_name": last_name, "email": email, "phone": phone, "country": "BD"}
     })
     if customer and "id" in customer:
-        logger.info(f"New customer created: {customer['id']} for {email}")
         return customer["id"], None
-
-    err = customer.get("message", "Customer create হয়নি") if customer else "Customer create হয়নি"
+    err = customer.get("message", "Customer create hoyni") if customer else "Customer create hoyni"
     return None, err
 
-
 def create_subscription_directly(email, phone, first_name, last_name, product_id, variation_id, variation_attributes, coupon=None):
-    """
-    সরাসরি WooCommerce Subscription create করো।
-    Payment হওয়ার পর manually activate করতে হবে।
-    """
     customer_id, err = get_or_create_customer(email, phone, first_name, last_name)
     if err:
         return None, err
-
-    # Line item
     line_item = {"product_id": product_id, "quantity": 1}
     if variation_id:
         line_item["variation_id"] = variation_id
         if variation_attributes:
-            line_item["meta_data"] = [
-                {"key": f"attribute_{k}", "value": v}
-                for k, v in variation_attributes.items()
-            ]
-
-    # Subscription body
+            line_item["meta_data"] = [{"key": f"attribute_{k}", "value": v} for k, v in variation_attributes.items()]
     sub_body = {
-        "customer_id":          customer_id,
-        "status":               "pending",
-        "billing_period":       "month",
-        "billing_interval":     1,
-        "payment_method":       "bacs",
-        "payment_method_title": "Manual Payment (bKash/Nagad)",
-        "billing": {
-            "first_name": first_name,
-            "last_name":  last_name,
-            "email":      email,
-            "phone":      phone,
-            "country":    "BD"
-        },
+        "customer_id": customer_id, "status": "pending",
+        "billing_period": "month", "billing_interval": 1,
+        "payment_method": "bacs", "payment_method_title": "Manual Payment (bKash/Nagad)",
+        "billing": {"first_name": first_name, "last_name": last_name, "email": email, "phone": phone, "country": "BD"},
         "line_items": [line_item],
         "meta_data": [
-            {"key": "_client_phone",    "value": phone},
-            {"key": "_client_name",     "value": f"{first_name} {last_name}"},
-            {"key": "_bot_order",       "value": "yes"}
+            {"key": "_client_phone", "value": phone},
+            {"key": "_client_name",  "value": f"{first_name} {last_name}"},
+            {"key": "_bot_order",    "value": "yes"}
         ]
     }
-
-    # Coupon থাকলে যোগ করো
     if coupon:
         sub_body["coupon_lines"] = [{"code": coupon}]
-
     subscription = wc_post_req("subscriptions", sub_body)
-
     if not subscription or "id" not in subscription:
-        # Fallback — normal order
-        logger.warning("Subscription API failed, trying order API...")
-        return create_order_fallback(
-            email, phone, first_name, last_name,
-            product_id, variation_id, variation_attributes,
-            customer_id, coupon)
-
+        return create_order_fallback(email, phone, first_name, last_name, product_id, variation_id, variation_attributes, customer_id, coupon)
     return subscription, None
 
-
-def create_order_fallback(email, phone, first_name, last_name, product_id,
-                          variation_id, variation_attributes, customer_id, coupon=None):
-    """Subscription API কাজ না করলে normal order create করো"""
+def create_order_fallback(email, phone, first_name, last_name, product_id, variation_id, variation_attributes, customer_id, coupon=None):
     line_item = {"product_id": product_id, "quantity": 1}
     if variation_id:
         line_item["variation_id"] = variation_id
         if variation_attributes:
-            line_item["meta_data"] = [
-                {"key": f"attribute_{k}", "value": v}
-                for k, v in variation_attributes.items()
-            ]
-
+            line_item["meta_data"] = [{"key": f"attribute_{k}", "value": v} for k, v in variation_attributes.items()]
     order_body = {
-        "customer_id":          customer_id,
-        "payment_method":       "bacs",
-        "payment_method_title": "Manual Payment (bKash/Nagad)",
-        "set_paid":             False,
-        "billing": {
-            "first_name": first_name,
-            "last_name":  last_name,
-            "email":      email,
-            "phone":      phone,
-            "country":    "BD"
-        },
+        "customer_id": customer_id, "payment_method": "bacs",
+        "payment_method_title": "Manual Payment (bKash/Nagad)", "set_paid": False,
+        "billing": {"first_name": first_name, "last_name": last_name, "email": email, "phone": phone, "country": "BD"},
         "line_items": [line_item],
         "meta_data": [
             {"key": "_client_phone",      "value": phone},
@@ -636,31 +548,23 @@ def create_order_fallback(email, phone, first_name, last_name, product_id,
             {"key": "_is_fallback_order", "value": "yes"}
         ]
     }
-
     if coupon:
         order_body["coupon_lines"] = [{"code": coupon}]
-
     order = wc_post_req("orders", order_body)
-
     if not order or "id" not in order:
-        err = order.get("message", "Order create হয়নি") if order else "Order/Subscription create হয়নি"
+        err = order.get("message", "Order create hoyni") if order else "Order/Subscription create hoyni"
         return None, err
-
     return order, None
 
 def get_subscriptions_by_email(email):
-    """Email দিয়ে সব WooCommerce subscriptions খোঁজো"""
     try:
         resp = req.get(
             f"{WP_URL}/wp-json/wc/v3/subscriptions",
             auth=(WC_KEY, WC_SECRET),
-            params={"search": email, "per_page": 20},
-            timeout=15
-        )
+            params={"search": email, "per_page": 20}, timeout=15)
         subs = resp.json()
         if isinstance(subs, list):
-            return [s for s in subs
-                    if s.get("billing", {}).get("email", "").lower() == email.lower()]
+            return [s for s in subs if s.get("billing", {}).get("email", "").lower() == email.lower()]
         return []
     except Exception as e:
         logger.error(f"Subscription fetch error: {e}")
@@ -677,26 +581,17 @@ def create_renewal_order(sub_id):
         return None
 
 def generate_payment_link(order_id, order_key=None, email=None):
-    """
-    Auto-login payment link generate করো।
-    Client login ছাড়াই pay করতে পারবে।
-    """
-    # WordPress autologin endpoint call করো
     if email:
         try:
             resp = req.post(
                 f"{WP_URL}/wp-json/fdbot/v1/autologin-link",
                 headers={"X-FD-Secret": WP_PAYLATER_SECRET or "changeme123"},
-                json={"order_id": order_id, "email": email},
-                timeout=10
-            )
+                json={"order_id": order_id, "email": email}, timeout=10)
             data = resp.json()
             if data.get("success") and data.get("autologin_url"):
                 return data["autologin_url"]
         except Exception as e:
             logger.error(f"Autologin link error: {e}")
-
-    # Fallback — normal payment link
     if order_key:
         return f"{WP_URL}/checkout/order-pay/{order_id}/?pay_for_order=true&key={order_key}"
     order = wc_get(f"orders/{order_id}")
@@ -705,8 +600,24 @@ def generate_payment_link(order_id, order_key=None, email=None):
         return f"{WP_URL}/checkout/order-pay/{order_id}/?pay_for_order=true&key={key}"
     return f"{WP_URL}/my-account/"
 
-SUB_STATUS_EMOJI = {"active":"✅","on-hold":"⏸️","cancelled":"❌","expired":"⌛","pending":"🕐"}
-SUB_STATUS_LABEL = {"active":"Active","on-hold":"On Hold","cancelled":"Cancelled","expired":"Expired","pending":"Pending"}
+# =================== SUBSCRIPTION DISPLAY ===================
+
+SUB_STATUS_EMOJI = {
+    "active":    "✅",
+    "on-hold":   "⏸️",
+    "cancelled": "❌",
+    "expired":   "⌛",
+    "pending":   "🕐"
+}
+
+# ── UPDATED: বাংলায় status label ──
+SUB_STATUS_LABEL = {
+    "active":    "Active — চালু আছে",
+    "on-hold":   "Paused — বন্ধ আছে",
+    "cancelled": "Cancelled",
+    "expired":   "Expired",
+    "pending":   "Pending"
+}
 
 def format_subscription_text(sub):
     sub_id     = sub.get("id", "?")
@@ -722,7 +633,7 @@ def format_subscription_text(sub):
     text += f"   💵 ৳{total}\n"
     text += f"   Status: {label}\n"
     if next_date:
-        text += f"   🔄 Next Payment: {next_date[:10]}\n"
+        text += f"   📅 Next Payment: {next_date[:10]}\n"
     return text
 
 # =================== NOTIFICATION HELPERS ===================
@@ -813,17 +724,14 @@ async def send_payment_reminders():
             for order in due_orders:
                 conn = get_db()
                 try:
-                    conn.run("UPDATE reseller_bot_orders SET payment_reminder_count=payment_reminder_count+1 WHERE id=:id",
-                             id=order["id"])
+                    conn.run("UPDATE reseller_bot_orders SET payment_reminder_count=payment_reminder_count+1 WHERE id=:id", id=order["id"])
                 finally:
                     conn.close()
                 count = order["reminder_count"] + 1
                 try:
                     conn3 = get_db()
                     try:
-                        rr = conn3.run(
-                            "SELECT telegram_chat_id FROM resellers WHERE UPPER(reseller_code)=UPPER(:c)",
-                            c=order["reseller_code"])
+                        rr = conn3.run("SELECT telegram_chat_id FROM resellers WHERE UPPER(reseller_code)=UPPER(:c)", c=order["reseller_code"])
                     finally:
                         conn3.close()
                     if rr and rr[0][0]:
@@ -970,12 +878,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if order:
             conn = get_db()
             try:
-                conn.run("UPDATE reseller_bot_orders SET status='rejected', reject_reason=:r WHERE id=:id",
-                         r=text, id=order_id)
+                conn.run("UPDATE reseller_bot_orders SET status='rejected', reject_reason=:r WHERE id=:id", r=text, id=order_id)
             finally:
                 conn.close()
-            await notify_reseller(order["reseller_code"],
-                f"❌ *Order #{order_id} Reject*\n\n📦 {order['product']}\nকারণ: {text}")
+            await notify_reseller(order["reseller_code"], f"❌ *Order #{order_id} Reject*\n\n📦 {order['product']}\nকারণ: {text}")
             await update.message.reply_text(f"❌ Order #{order_id} reject।", reply_markup=main_menu_keyboard())
         context.user_data["state"] = None
         return
@@ -1011,9 +917,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data  = query.data
 
     # ══════════════════════════════════════════
-    # ✅ Subscription — Check
+    # Subscription Check
     # ══════════════════════════════════════════
-
     if data == "sub_check":
         await query.edit_message_text(
             "📋 *Subscription Check*\n\nClient এর email দাও:\n`/sub email@gmail.com`",
@@ -1022,21 +927,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ══════════════════════════════════════════
-    # ✅ Subscription — নতুন Create (Dynamic)
+    # Subscription নতুন Create
     # ══════════════════════════════════════════
-
     elif data == "sub_new":
         await query.edit_message_text(
-            "➕ *নতুন Subscription Create*\n\nFormat:\n`/newsub email phone password`\n\n"
-            "Example:\n`/newsub john@gmail.com 01712345678 Pass@123`",
+            "➕ *নতুন Subscription Create*\n\nFormat:\n`/newsub email \"Name\" phone`\n\n"
+            "Example:\n`/newsub john@gmail.com \"John Doe\" 01712345678`",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
             parse_mode="Markdown")
         return
 
     # ══════════════════════════════════════════
-    # ✅ Product select (dynamic from WooCommerce)
+    # Product select
     # ══════════════════════════════════════════
-
     elif data.startswith("newsub_prod_"):
         product_id = int(data.split("_")[2])
         await query.edit_message_text(f"⏳ Product #{product_id} এর plans fetch করছি...")
@@ -1058,7 +961,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     elif data == "newsub_back":
-        # Products list আবার দেখাও
         await query.edit_message_text("⏳ Products fetch করছি...")
         products = fetch_subscription_products()
         if not products:
@@ -1076,77 +978,45 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ══════════════════════════════════════════
-    # ✅ Variation select → Order create
+    # Variation select → Order create
     # ══════════════════════════════════════════
-
     elif data.startswith("newsub_var_"):
         parts      = data.split("_")
         product_id = int(parts[2])
         var_id     = int(parts[3])
-
         email      = context.user_data.get("newsub_email")
         phone      = context.user_data.get("newsub_phone")
         first_name = context.user_data.get("newsub_first_name", "Customer")
         last_name  = context.user_data.get("newsub_last_name", "Customer")
         full_name  = context.user_data.get("newsub_full_name", "Customer")
         coupon     = context.user_data.get("newsub_coupon")
-
         if not email:
-            await query.edit_message_text(
-                "❌ Session শেষ। আবার `/newsub` দাও।",
-                parse_mode="Markdown")
+            await query.edit_message_text("❌ Session শেষ। আবার `/newsub` দাও।", parse_mode="Markdown")
             return
-
         await query.edit_message_text(f"⏳ `{email}` এর জন্য subscription create করছি...")
-
-        # Variation info নাও
-        variations = fetch_product_variations(product_id)
+        variations   = fetch_product_variations(product_id)
         selected_var = next((v for v in variations if v["id"] == var_id), None)
-
         if not selected_var:
-            await query.edit_message_text("❌ Variation পাওয়া যায়নি।",
+            await query.edit_message_text("❌ Variation পাওয়া যায়নি.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
             return
-
-        # Attribute prepare করো
         variation_attributes = {}
         if selected_var.get("attribute_slug") and selected_var.get("attribute_option"):
             variation_attributes[selected_var["attribute_slug"]] = selected_var["attribute_option"]
-
-        order, error = create_subscription_directly(
-            email, phone, first_name, last_name,
-            product_id, var_id, variation_attributes, coupon)
-
-        # Context clear
-        context.user_data.pop("newsub_email", None)
-        context.user_data.pop("newsub_phone", None)
-        context.user_data.pop("newsub_first_name", None)
-        context.user_data.pop("newsub_last_name", None)
-        context.user_data.pop("newsub_full_name", None)
-        context.user_data.pop("newsub_coupon", None)
-        context.user_data.pop("newsub_product_id", None)
-
+        order, error = create_subscription_directly(email, phone, first_name, last_name, product_id, var_id, variation_attributes, coupon)
+        for k in ["newsub_email","newsub_phone","newsub_first_name","newsub_last_name","newsub_full_name","newsub_coupon","newsub_product_id"]:
+            context.user_data.pop(k, None)
         if error:
-            await query.edit_message_text(
-                f"❌ Error: {error}",
+            await query.edit_message_text(f"❌ Error: {error}",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
                 parse_mode="Markdown")
             return
-
         order_id  = order["id"]
         order_key = order.get("order_key", "")
-
-        # Subscription নাকি Order check করো
-        is_sub = "/subscriptions/" in str(
-            order.get("_links", {}).get("self", [{}])[0].get("href", ""))
-
-        # Payment link generate করো
+        is_sub    = "/subscriptions/" in str(order.get("_links", {}).get("self", [{}])[0].get("href", ""))
         if is_sub:
-            # Subscription এর initial order এর link নাও
             try:
-                sub_orders_resp = req.get(
-                    f"{WP_URL}/wp-json/wc/v3/subscriptions/{order_id}/orders",
-                    auth=(WC_KEY, WC_SECRET), timeout=15)
+                sub_orders_resp = req.get(f"{WP_URL}/wp-json/wc/v3/subscriptions/{order_id}/orders", auth=(WC_KEY, WC_SECRET), timeout=15)
                 sub_orders = sub_orders_resp.json()
                 if isinstance(sub_orders, list) and len(sub_orders) > 0:
                     init_order    = sub_orders[0]
@@ -1160,49 +1030,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pay_link = f"{WP_URL}/my-account/view-subscription/{order_id}/"
         else:
             pay_link = generate_payment_link(order_id, order_key, email=email)
-
-        type_label   = "Subscription" if is_sub else "Order"
-        coupon_text  = f"\n🎟️ Coupon: `{coupon}`" if coupon else ""
-
+        type_label  = "Subscription" if is_sub else "Order"
+        coupon_text = f"\n🎟️ Coupon: `{coupon}`" if coupon else ""
         keyboard = [
-            [InlineKeyboardButton(
-                f"✅ #{order_id} Activate করো (Payment নেওয়ার পর)",
-                callback_data=f"sub_activate_{order_id}_{'sub' if is_sub else 'order'}"
-            )],
+            [InlineKeyboardButton(f"✅ #{order_id} Activate করো", callback_data=f"sub_activate_{order_id}_{'sub' if is_sub else 'order'}")],
             [InlineKeyboardButton("🏠 Menu", callback_data="menu")]
         ]
-
         await query.edit_message_text(
             f"✅ *{type_label} #{order_id} Create হয়েছে!*\n\n"
-            f"👤 Name: `{full_name}`\n"
-            f"📧 Email: `{email}`\n"
-            f"📱 Phone: `{phone}`\n"
-            f"📦 Plan: {selected_var['name']}\n"
-            f"💵 Amount: ৳{selected_var['price']}{coupon_text}\n\n"
+            f"👤 Name: `{full_name}`\n📧 Email: `{email}`\n📱 Phone: `{phone}`\n"
+            f"📦 Plan: {selected_var['name']}\n💵 Amount: ৳{selected_var['price']}{coupon_text}\n\n"
             f"👇 Payment link client কে পাঠাও:\n`{pay_link}`\n\n"
             f"_Client pay করার পর নিচের button press করো_ 👇",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown")
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         return
 
     # ══════════════════════════════════════════
-    # ✅ Subscription/Order Activate button
+    # Activate button
     # ══════════════════════════════════════════
-
     elif data.startswith("sub_activate_"):
         parts   = data.split("_")
         item_id = int(parts[2])
         is_sub  = len(parts) > 3 and parts[3] == "sub"
-
         await query.edit_message_text(f"⏳ #{item_id} activate করছি...")
-
         if is_sub:
-            # Subscription directly activate করো
             result = wc_put(f"subscriptions/{item_id}", {"status": "active"})
         else:
-            # Order complete করো → subscription auto create হবে
             result = wc_put(f"orders/{item_id}", {"status": "completed"})
-
         if result and result.get("status") in ["active", "completed"]:
             await query.edit_message_text(
                 f"✅ *#{item_id} Activated!*\n\nClient এর subscription চালু হয়ে গেছে। 🎉",
@@ -1217,9 +1071,73 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ══════════════════════════════════════════
-    # ✅ Subscription Renew/Cancel buttons
+    # ── UPDATED: Subscription Pause ──
     # ══════════════════════════════════════════
+    elif data.startswith("sub_pause_confirm_"):
+        sub_id = int(data.split("_")[3])
+        result = wc_put(f"subscriptions/{sub_id}", {"status": "on-hold"})
+        if result and result.get("status") == "on-hold":
+            await query.edit_message_text(
+                f"⏸️ *Subscription #{sub_id} Paused!*\n\nClient এর access বন্ধ হয়েছে।\n\nResume করতে: `/sub email`",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
+                parse_mode="Markdown")
+        else:
+            await query.edit_message_text(
+                "❌ Pause হয়নি। WooCommerce dashboard এ manually করো.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
+        return
 
+    elif data.startswith("sub_pause_"):
+        sub_id = int(data.split("_")[2])
+        keyboard = [[
+            InlineKeyboardButton("⏸️ হ্যাঁ Pause করো", callback_data=f"sub_pause_confirm_{sub_id}"),
+            InlineKeyboardButton("❌ না",               callback_data="menu")
+        ]]
+        await query.edit_message_text(
+            f"⏸️ *Subscription #{sub_id} Pause করবে?*\n\nClient এর access বন্ধ হবে।",
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        return
+
+    # ══════════════════════════════════════════
+    # ── UPDATED: Subscription Resume ──
+    # ══════════════════════════════════════════
+    elif data.startswith("sub_resume_confirm_"):
+        sub_id = int(data.split("_")[3])
+        await query.edit_message_text(f"⏳ #{sub_id} resume করছি...")
+        result = wc_put(f"subscriptions/{sub_id}", {"status": "active"})
+        if result and result.get("status") == "active":
+            next_date    = result.get("next_payment_date_gmt", "")
+            next_show    = next_date[:10] if next_date else "N/A"
+            items        = result.get("line_items", [])
+            item_names   = ", ".join([i.get("name", "?") for i in items])
+            client_email = result.get("billing", {}).get("email", "")
+            await query.edit_message_text(
+                f"✅ *Subscription #{sub_id} Resume হয়েছে!*\n\n"
+                f"📦 {item_names}\n📧 {client_email}\n📅 পরবর্তী Renewal: {next_show}\n\n"
+                f"_Client কে WhatsApp notification গেছে।_",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
+                parse_mode="Markdown")
+        else:
+            await query.edit_message_text(
+                f"❌ Resume হয়নি।\n\nWooCommerce → Subscriptions → #{sub_id} → Status: Active",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]))
+        return
+
+    elif data.startswith("sub_resume_"):
+        sub_id = int(data.split("_")[2])
+        keyboard = [[
+            InlineKeyboardButton("✅ টাকা পেয়েছি — Resume করো", callback_data=f"sub_resume_confirm_{sub_id}"),
+            InlineKeyboardButton("❌ Cancel",                     callback_data="menu")
+        ]]
+        await query.edit_message_text(
+            f"▶️ *Subscription #{sub_id} Resume*\n\n"
+            f"Client এর কাছ থেকে payment নিয়েছো?\n\nConfirm হলে Resume করো 👇",
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        return
+
+    # ══════════════════════════════════════════
+    # Subscription Renew
+    # ══════════════════════════════════════════
     elif data.startswith("sub_renew_"):
         sub_id = int(data.split("_")[2])
         keyboard = [
@@ -1239,7 +1157,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if renewal and "id" in renewal:
             order_id  = renewal["id"]
             order_key = renewal.get("order_key", "")
-            # Sub এর billing email নাও
             sub_data  = wc_get(f"subscriptions/{sub_id}")
             sub_email = sub_data.get("billing", {}).get("email") if sub_data else None
             pay_link  = generate_payment_link(order_id, order_key, email=sub_email)
@@ -1298,21 +1215,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ══════════════════════════════════════════
-    # Existing Reseller buttons
+    # Reseller buttons
     # ══════════════════════════════════════════
-
     if data.startswith("rapprove_"):
         order_id = int(data.split("_")[1])
         order    = get_reseller_bot_order(order_id)
         if order:
             conn = get_db()
             try:
-                conn.run("UPDATE reseller_bot_orders SET status='account_delivered', account_delivered_at=NOW() WHERE id=:id",
-                         id=order_id)
+                conn.run("UPDATE reseller_bot_orders SET status='account_delivered', account_delivered_at=NOW() WHERE id=:id", id=order_id)
             finally:
                 conn.close()
-            await send_account_delivered_to_reseller(
-                order_id, order["reseller_code"], order["product"], order["customer_email"], order["amount"])
+            await send_account_delivered_to_reseller(order_id, order["reseller_code"], order["product"], order["customer_email"], order["amount"])
             await query.edit_message_text(
                 f"✅ *Order #{order_id} Approved!*\n\n📧 {order['customer_email']} এ invitation পাঠাও।",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
@@ -1338,8 +1252,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                          n=f"Reseller #{order_id} — {order['product']} ({order['reseller_code']})")
             finally:
                 conn.close()
-            await notify_reseller(order["reseller_code"],
-                f"🎉 *Order #{order_id} সম্পন্ন!*\n\n📦 {order['product']}\n💵 ৳{order['amount']}\n\nধন্যবাদ!")
+            await notify_reseller(order["reseller_code"], f"🎉 *Order #{order_id} সম্পন্ন!*\n\n📦 {order['product']}\n💵 ৳{order['amount']}\n\nধন্যবাদ!")
             await query.edit_message_text(
                 f"✅ *Order #{order_id} Complete!*\n💵 ৳{order['amount']} income এ যোগ।",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
@@ -1355,8 +1268,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 conn.run("UPDATE reseller_bot_orders SET transaction_id=NULL WHERE id=:id", id=order_id)
             finally:
                 conn.close()
-            await notify_reseller(order["reseller_code"],
-                f"❌ *Order #{order_id} — TxnID ভুল!*\n\nSothik TxnID dao।")
+            await notify_reseller(order["reseller_code"], f"❌ *Order #{order_id} — TxnID ভুল!*\n\nSothik TxnID dao।")
             await query.edit_message_text(
                 f"❌ Order #{order_id} TxnID ভুল। Reseller কে জানানো হয়েছে।",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
@@ -1368,8 +1280,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["reminder_order_id"] = order_id
         context.user_data["state"]              = "waiting_manual_reminder"
         order = get_reseller_bot_order(order_id)
-        await query.edit_message_text(
-            f"📩 Order #{order_id} ({order['reseller_code']}) কে কী message পাঠাবে?")
+        await query.edit_message_text(f"📩 Order #{order_id} ({order['reseller_code']}) কে কী message পাঠাবে?")
         return
 
     # ── Menu navigation ──
@@ -1397,13 +1308,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reseller_code = data.replace("remind_reseller_", "")
         conn = get_db()
         try:
-            orders = conn.run(
-                "SELECT id, product, amount FROM reseller_bot_orders WHERE reseller_code=:c AND status='payment_due'",
-                c=reseller_code)
+            orders = conn.run("SELECT id, product, amount FROM reseller_bot_orders WHERE reseller_code=:c AND status='payment_due'", c=reseller_code)
         finally:
             conn.close()
         if not orders:
-            await query.edit_message_text(f"✅ {reseller_code} এর কোনো due নেই।",
+            await query.edit_message_text(f"✅ {reseller_code} এর কোনো due নেই.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="due_baki")]])); return
         count = 0
         for o in orders:
@@ -1435,7 +1344,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             rows = conn.run("SELECT name, phone FROM resellers WHERE id=:id", id=reseller_id)
             if not rows:
-                await query.edit_message_text("❌ Reseller পাওয়া যায়নি।",
+                await query.edit_message_text("❌ Reseller পাওয়া যায়নি.",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]])); return
             name, phone = rows[0][0], rows[0][1]
             conn.run("UPDATE reseller_bot_orders SET reseller_id=NULL WHERE reseller_id=:id", id=reseller_id)
@@ -1548,7 +1457,7 @@ async def show_resellers(query):
 async def show_reseller_bot_orders_today(query):
     orders = db_get_today_reseller_bot_orders()
     if not orders:
-        await query.edit_message_text("🛍️ আজ কোনো reseller bot order নেই।",
+        await query.edit_message_text("🛍️ আজ কোনো reseller bot order নেই.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]])); return
     text = f"🛍️ *আজকের Reseller Bot Orders ({len(orders)}টা):*\n\n"
     keyboard = []
@@ -1570,7 +1479,7 @@ async def show_reseller_bot_orders_today(query):
 async def show_due_baki(query):
     due_list = db_get_payment_due_summary()
     if not due_list:
-        await query.edit_message_text("✅ *সব clear!*\n\nকোনো payment বাকি নেই।",
+        await query.edit_message_text("✅ *সব clear!*\n\nকোনো payment বাকি নেই.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]]),
             parse_mode="Markdown"); return
     total_due = sum(float(d["due_amount"].replace("৳","")) for d in due_list)
@@ -1638,8 +1547,8 @@ async def customer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += f"\n💰 *মোট: ৳{total_spent:.2f}*"
     await update.message.reply_text(text, parse_mode="Markdown")
 
+# ── UPDATED: subscription_command ──
 async def subscription_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/sub email@gmail.com — subscription check"""
     if not context.args:
         await update.message.reply_text("📋 Format: `/sub email@gmail.com`", parse_mode="Markdown"); return
     email = context.args[0].lower().strip()
@@ -1647,53 +1556,40 @@ async def subscription_command(update: Update, context: ContextTypes.DEFAULT_TYP
     subs = get_subscriptions_by_email(email)
     if not subs:
         await update.message.reply_text(
-            f"❌ `{email}` এ কোনো subscription নেই।\n\nনতুন create করতে:\n`/newsub {email} phone password`",
+            f"❌ `{email}` এ কোনো subscription নেই।\n\nনতুন create করতে:\n`/newsub {email} \"Name\" phone`",
             parse_mode="Markdown"); return
-    text = f"📋 *{email} এর Subscriptions ({len(subs)}টা):*\n\n"
+    text     = f"📋 *{email} এর Subscriptions ({len(subs)}টা):*\n\n"
     keyboard = []
     for sub in subs:
         sub_id = sub.get("id")
         status = sub.get("status", "unknown")
         text  += format_subscription_text(sub) + "\n"
         row = []
-        if status in ["active", "on-hold", "pending"]:
-            row.append(InlineKeyboardButton(f"🔄 #{sub_id} Renew",  callback_data=f"sub_renew_{sub_id}"))
+        if status == "on-hold":
+            row.append(InlineKeyboardButton(f"▶️ #{sub_id} Resume", callback_data=f"sub_resume_{sub_id}"))
             row.append(InlineKeyboardButton(f"❌ #{sub_id} Cancel", callback_data=f"sub_cancel_{sub_id}"))
+        elif status in ["active", "pending"]:
+            row.append(InlineKeyboardButton(f"⏸️ #{sub_id} Pause", callback_data=f"sub_pause_{sub_id}"))
+            row.append(InlineKeyboardButton(f"🔄 #{sub_id} Renew", callback_data=f"sub_renew_{sub_id}"))
         elif status in ["cancelled", "expired"]:
-            row.append(InlineKeyboardButton(f"🔄 #{sub_id} Reactivate", callback_data=f"sub_renew_{sub_id}"))
+            row.append(InlineKeyboardButton(f"▶️ #{sub_id} Reactivate", callback_data=f"sub_resume_{sub_id}"))
         if row:
             keyboard.append(row)
     keyboard.append([InlineKeyboardButton("🏠 Menu", callback_data="menu")])
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def new_subscription_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /newsub email "Full Name" phone [coupon]
-    Example: /newsub john@gmail.com "John Doe" 01712345678
-    Example with coupon: /newsub john@gmail.com "John Doe" 01712345678 SAVE20
-    """
-    # Raw text থেকে parse করো (quoted name support)
     raw = update.message.text.split(None, 1)
     if len(raw) < 2:
         await update.message.reply_text(
-            '📋 Format:\n`/newsub email "Full Name" phone`\n\n'
-            'Example:\n`/newsub john@gmail.com "John Doe" 01712345678`\n\n'
-            'Coupon সহ:\n`/newsub john@gmail.com "John Doe" 01712345678 SAVE20`',
+            '📋 Format:\n`/newsub email "Full Name" phone`\n\nExample:\n`/newsub john@gmail.com "John Doe" 01712345678`',
             parse_mode="Markdown"); return
-
     args_str = raw[1].strip()
-
-    # Email নাও (প্রথম word)
     parts = args_str.split(None, 1)
     if len(parts) < 2:
-        await update.message.reply_text(
-            '❌ Format ঠিক নেই!\n\n`/newsub email "Full Name" phone`',
-            parse_mode="Markdown"); return
-
-    email    = parts[0].lower().strip()
-    rest     = parts[1].strip()
-
-    # Quoted name parse করো
+        await update.message.reply_text('❌ Format ঠিক নেই!\n\n`/newsub email "Full Name" phone`', parse_mode="Markdown"); return
+    email = parts[0].lower().strip()
+    rest  = parts[1].strip()
     if rest.startswith('"'):
         end_quote = rest.find('"', 1)
         if end_quote == -1:
@@ -1701,63 +1597,40 @@ async def new_subscription_command(update: Update, context: ContextTypes.DEFAULT
         full_name  = rest[1:end_quote].strip()
         after_name = rest[end_quote+1:].strip().split()
     else:
-        # Quote ছাড়া হলে প্রথম word name, বাকি phone+coupon
         after_name_parts = rest.split()
         full_name  = after_name_parts[0] if after_name_parts else ""
         after_name = after_name_parts[1:] if len(after_name_parts) > 1 else []
-
     if not after_name:
-        await update.message.reply_text(
-            '❌ Phone number দাও!\n\n`/newsub email "Full Name" phone`',
-            parse_mode="Markdown"); return
-
+        await update.message.reply_text('❌ Phone number দাও!\n\n`/newsub email "Full Name" phone`', parse_mode="Markdown"); return
     phone  = after_name[0].strip()
     coupon = after_name[1].strip().upper() if len(after_name) > 1 else None
-
-    # Validate
     if "@" not in email or "." not in email:
         await update.message.reply_text("❌ Valid email দাও!"); return
     if len(phone) < 10:
         await update.message.reply_text("❌ Valid phone number দাও!"); return
-
-    # Name split করো
     name_parts = full_name.split(None, 1)
     first_name = name_parts[0] if name_parts else email.split("@")[0]
     last_name  = name_parts[1] if len(name_parts) > 1 else "Customer"
-
-    # Context এ save করো
     context.user_data["newsub_email"]      = email
     context.user_data["newsub_phone"]      = phone
     context.user_data["newsub_first_name"] = first_name
     context.user_data["newsub_last_name"]  = last_name
     context.user_data["newsub_full_name"]  = full_name
     context.user_data["newsub_coupon"]     = coupon
-
     coupon_text = f"\n🎟️ Coupon: `{coupon}`" if coupon else ""
-
     await update.message.reply_text(
-        f"✅ Client details নেওয়া হয়েছে!\n\n"
-        f"👤 Name: `{full_name}`\n"
-        f"📧 Email: `{email}`\n"
-        f"📱 Phone: `{phone}`{coupon_text}\n\n"
-        f"⏳ Products fetch করছি...",
+        f"✅ Client details নেওয়া হয়েছে!\n\n👤 Name: `{full_name}`\n📧 Email: `{email}`\n📱 Phone: `{phone}`{coupon_text}\n\n⏳ Products fetch করছি...",
         parse_mode="Markdown")
-
-    # WooCommerce থেকে subscription products আনো
     products = fetch_subscription_products()
-
     if not products:
-        await update.message.reply_text("❌ কোনো subscription product পাওয়া যায়নি।")
-        return
-
+        await update.message.reply_text("❌ কোনো subscription product পাওয়া যায়নি।"); return
     keyboard = []
     for p in products:
         price_label = f" — ৳{p['price']}+" if p.get("price") and p["price"] != "?" else ""
         keyboard.append([InlineKeyboardButton(f"📦 {p['name']}{price_label}", callback_data=f"newsub_prod_{p['id']}")])
     keyboard.append([InlineKeyboardButton("🏠 Menu", callback_data="menu")])
-
     await update.message.reply_text(
-        f"🛍️ *কোন product এর subscription create করবে?*",
+        "🛍️ *কোন product এর subscription create করবে?*",
         reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def listresellers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1808,14 +1681,12 @@ async def removereseller_command(update: Update, context: ContextTypes.DEFAULT_T
     safe_code = reseller_code.replace(".", "_")
     cb_data   = f"confirm_remove_reseller_{reseller_id}_{safe_code}"
     if active_count > 0:
-        keyboard = [[InlineKeyboardButton("⚠️ তারপরেও বাদ দাও", callback_data=cb_data),InlineKeyboardButton("❌ Cancel",callback_data="menu")]]
-        await update.message.reply_text(
-            f"⚠️ {reseller_name} এর *{active_count}টা active order* আছে! তারপরেও বাদ দেবে?",
+        keyboard = [[InlineKeyboardButton("⚠️ তারপরেও বাদ দাও", callback_data=cb_data), InlineKeyboardButton("❌ Cancel", callback_data="menu")]]
+        await update.message.reply_text(f"⚠️ {reseller_name} এর *{active_count}টা active order* আছে! তারপরেও বাদ দেবে?",
             reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     else:
-        keyboard = [[InlineKeyboardButton("✅ বাদ দাও", callback_data=cb_data),InlineKeyboardButton("❌ Cancel",callback_data="menu")]]
-        await update.message.reply_text(
-            f"🗑️ *{reseller_name}* বাদ দেবে?\n📞 {reseller_phone} | 🔑 `{reseller_code}`",
+        keyboard = [[InlineKeyboardButton("✅ বাদ দাও", callback_data=cb_data), InlineKeyboardButton("❌ Cancel", callback_data="menu")]]
+        await update.message.reply_text(f"🗑️ *{reseller_name}* বাদ দেবে?\n📞 {reseller_phone} | 🔑 `{reseller_code}`",
             reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def resellersale_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1851,9 +1722,7 @@ def _wp_paylater_api(method, endpoint, email=None):
 
 async def paylater_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 1:
-        await update.message.reply_text(
-            "📋 *Pay Later:*\n\n`/paylater add email`\n`/paylater remove email`\n`/paylater list`",
-            parse_mode="Markdown"); return
+        await update.message.reply_text("📋 *Pay Later:*\n\n`/paylater add email`\n`/paylater remove email`\n`/paylater list`", parse_mode="Markdown"); return
     sub = context.args[0].lower()
     context.args = context.args[1:]
     if sub == "add":
@@ -1912,9 +1781,7 @@ async def reseller_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🛍️ Welcome back *{reseller['name']}* bhai! 👋\nCode: `{reseller['code']}`{due_txt}\n\nKi korte chao?",
             reply_markup=reseller_main_menu(), parse_mode="Markdown")
         return ConversationHandler.END
-    await update.message.reply_text(
-        "🛍️ *FD Reseller Bot*\n\nAssalamualaikum! 👋\n\nTomar *reseller code* dao:",
-        parse_mode="Markdown")
+    await update.message.reply_text("🛍️ *FD Reseller Bot*\n\nAssalamualaikum! 👋\n\nTomar *reseller code* dao:", parse_mode="Markdown")
     return WAITING_CODE
 
 async def reseller_handle_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1981,7 +1848,7 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
         finally:
             conn.close()
         if not rows:
-            await query.edit_message_text("📋 কোনো order নেই।",
+            await query.edit_message_text("📋 কোনো order নেই.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="res_back")]])); return
         text = "📋 *Last 10 Order:*\n\n"
         keyboard = []
@@ -2023,7 +1890,7 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
                 except Exception as e:
                     logger.error(f"Admin txn verify error: {e}")
                 await query.edit_message_text(
-                    f"✅ Order #{order_id} confirmed! Admin verify করবে।",
+                    f"✅ Order #{order_id} confirmed! Admin verify করবে.",
                     reply_markup=reseller_main_menu(), parse_mode="Markdown")
             else:
                 try:
@@ -2080,11 +1947,9 @@ async def reseller_button_handler(update: Update, context: ContextTypes.DEFAULT_
             reseller_user_data[chat_id]["payment_method"]  = method
             reseller_user_data[chat_id]["paying_order_id"] = order_id
             reseller_user_data[chat_id]["state"]           = "waiting_due_txn"
-        order = get_reseller_bot_order(order_id)
         number_label = "Send Money" if method == "nagad" else "Payment"
         await query.edit_message_text(
-            f"💳 *{method.upper()}*\n\n📱 Number: *{number}* ({number_label})\n\n"
-            f"Payment এর পর *Transaction ID* দাও:",
+            f"💳 *{method.upper()}*\n\n📱 Number: *{number}* ({number_label})\n\nPayment এর পর *Transaction ID* দাও:",
             parse_mode="Markdown")
 
     elif data == "res_back":
@@ -2134,7 +1999,6 @@ async def reseller_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
     user_state = reseller_user_data.get(chat_id, {})
     state      = user_state.get("state")
     reseller   = get_reseller_by_chat_id(chat_id)
-
     if not reseller:
         await update.message.reply_text("আগে /start দাও!"); return
 
@@ -2176,7 +2040,7 @@ async def reseller_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"✅ *Order #{order_id} Submit!*\n\n📦 {product}\n📧 {email}\n💳 TxnID: `{text}`\n\n⏳ Admin approve করবে।",
                 reply_markup=reseller_main_menu(), parse_mode="Markdown")
         else:
-            await update.message.reply_text("❌ Problem! আবার try করো।")
+            await update.message.reply_text("❌ Problem! আবার try করো.")
         reseller_user_data.pop(chat_id, None)
 
     elif state == "waiting_due_txn":
@@ -2189,8 +2053,7 @@ async def reseller_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
         order = get_reseller_bot_order(order_id)
         conn  = get_db()
         try:
-            conn.run("UPDATE reseller_bot_orders SET transaction_id=:t, payment_method=:m WHERE id=:id",
-                     t=text, m=method, id=order_id)
+            conn.run("UPDATE reseller_bot_orders SET transaction_id=:t, payment_method=:m WHERE id=:id", t=text, m=method, id=order_id)
         finally:
             conn.close()
         await send_payment_check_to_admin(order_id, reseller["code"], text, method, order["amount"])
@@ -2220,8 +2083,7 @@ async def reseller_submit_order_handler(update: Update, context: ContextTypes.DE
             conn.close()
         order_id = rows[0][0] if rows else None
         if order_id:
-            await send_new_order_notification(order_id, reseller, chat_data["product_name"],
-                                              chat_data.get("customer_email","N/A"), chat_data["amount"])
+            await send_new_order_notification(order_id, reseller, chat_data["product_name"], chat_data.get("customer_email","N/A"), chat_data["amount"])
             await query.edit_message_text(
                 f"✅ *Order #{order_id} Submit!*\n\n📦 {chat_data['product_name']}\n📧 {chat_data.get('customer_email','N/A')}\n\n⏳ Admin approve করবে।",
                 reply_markup=reseller_main_menu(), parse_mode="Markdown")
@@ -2237,7 +2099,6 @@ def woocommerce_webhook():
         try: data = json.loads(raw)
         except: return jsonify({"status":"ok"}), 200
         if not data: return jsonify({"status":"ok"}), 200
-
         order_id       = str(data.get("id", "N/A"))
         customer       = data.get("billing", {})
         customer_name  = f"{customer.get('first_name','')} {customer.get('last_name','')}".strip() or "Unknown"
@@ -2245,16 +2106,13 @@ def woocommerce_webhook():
         total          = float(data.get("total", 0))
         status         = data.get("status", "pending")
         items_text     = ", ".join([f"{i['name']} x{i['quantity']}" for i in data.get("line_items", [])])
-
         conn = get_db()
         try:
             conn.run("INSERT INTO orders (woo_order_id,customer_name,customer_email,total,status,items) VALUES (:o,:n,:e,:t,:s,:i)",
                      o=order_id, n=customer_name, e=customer_email, t=total, s=status, i=items_text)
-            conn.run("INSERT INTO income (amount,note,type) VALUES (:a,:n,'auto')",
-                     a=total, n=f"WooCommerce Order #{order_id}")
+            conn.run("INSERT INTO income (amount,note,type) VALUES (:a,:n,'auto')", a=total, n=f"WooCommerce Order #{order_id}")
         finally:
             conn.close()
-
         msg = (f"🛍️ *নতুন WooCommerce Order!*\n\n📋 #{order_id}\n👤 {customer_name}\n"
                f"📧 {customer_email}\n📦 {items_text}\n💵 ৳{total}\n📊 {status}")
         asyncio.run_coroutine_threadsafe(send_telegram_message(msg), main_loop)
@@ -2280,11 +2138,9 @@ async def main():
     global main_loop
     main_loop = asyncio.get_event_loop()
     setup_db()
-
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
-    # ── Main bot ──
     main_app = Application.builder().token(BOT_TOKEN).build()
     main_app.add_handler(CommandHandler("start",          start))
     main_app.add_handler(CommandHandler("income",         income_command))
@@ -2299,7 +2155,6 @@ async def main():
     main_app.add_handler(CallbackQueryHandler(button_handler))
     main_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # ── Reseller bot ──
     reseller_conv = ConversationHandler(
         entry_points=[CommandHandler("start", reseller_start)],
         states={WAITING_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, reseller_handle_code)]},
