@@ -37,6 +37,10 @@ NAGAD_NUMBER       = os.environ.get("NAGAD_NUMBER", "01997806925")
 WP_URL             = os.environ.get("WP_URL", "https://favouritedeals.online")
 WP_PAYLATER_SECRET = os.environ.get("WP_PAYLATER_SECRET", "")
 
+FONNTE_TOKEN       = "8oSaMqEDoyw8Bk94Ctbv"
+FD_MAIN_WHATSAPP   = "01781678471"
+FD_WEBSITE         = "favouritedeals.online"
+
 # =================== SUBSCRIPTION PRODUCTS ===================
 SUBSCRIPTION_PRODUCTS = {
     23269: "Claude Pro",
@@ -65,6 +69,31 @@ PRODUCTS = {
     "chatgpt": {"name": "ChatGPT Plus Business (1 Month)", "price": 199},
     "gemini":  {"name": "Gemini Advanced (1 Month)",       "price": 850},
 }
+
+# =================== WHATSAPP HELPER ===================
+
+def send_fonnte_wa(phone, message):
+    """Fonnte API দিয়ে WhatsApp message পাঠাও"""
+    digits = re.sub(r'[^0-9]', '', phone)
+    if digits.startswith('880'): digits = '0' + digits[3:]
+    if digits.startswith('88'):  digits = '0' + digits[2:]
+    if not digits.startswith('0'): digits = '0' + digits
+    try:
+        resp = req.post(
+            'https://api.fonnte.com/send',
+            headers={'Authorization': FONNTE_TOKEN},
+            data={'target': digits, 'message': message, 'countryCode': '880'},
+            timeout=15
+        )
+        logger.info(f"Fonnte: {digits} → {resp.text}")
+    except Exception as e:
+        logger.error(f"Fonnte error: {e}")
+
+def wa_footer():
+    return (f"\n\n─────────────────\n"
+            f"📞 যোগাযোগ: *{FD_MAIN_WHATSAPP}*\n"
+            f"⚠️ এই নম্বরে reply করবেন না।\n"
+            f"🌐 {FD_WEBSITE}")
 
 # =================== DATABASE ===================
 
@@ -610,7 +639,6 @@ SUB_STATUS_EMOJI = {
     "pending":   "🕐"
 }
 
-# ── UPDATED: বাংলায় status label ──
 SUB_STATUS_LABEL = {
     "active":    "Active — চালু আছে",
     "on-hold":   "Paused — বন্ধ আছে",
@@ -1071,14 +1099,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ══════════════════════════════════════════
-    # ── UPDATED: Subscription Pause ──
+    # Subscription Pause — Confirm
     # ══════════════════════════════════════════
     elif data.startswith("sub_pause_confirm_"):
         sub_id = int(data.split("_")[3])
         result = wc_put(f"subscriptions/{sub_id}", {"status": "on-hold"})
         if result and result.get("status") == "on-hold":
+            # ── WhatsApp notification ──
+            items        = result.get("line_items", [])
+            plist        = ", ".join([i.get("name", "?") for i in items])
+            client_phone = result.get("billing", {}).get("phone", "")
+            client_name  = result.get("billing", {}).get("first_name", "প্রিয় গ্রাহক")
+            renew_url    = "https://favouritedeals.online/my-account/subscriptions/"
+            if client_phone:
+                msg = (
+                    f"━━━━━━━━━━━━━━━━━━\n⏸️ *Favourite Deals*\n━━━━━━━━━━━━━━━━━━\n\n"
+                    f"হ্যালো *{client_name}*,\n\nআপনার subscription *pause* হয়ে গেছে।\n\n"
+                    f"📦 Service: *{plist}*\n"
+                    f"📅 তারিখ: *{datetime.now().strftime('%d/%m/%Y')}*\n\n"
+                    f"🔄 Renew করলেই service আবার চালু হবে!\n\n"
+                    f"👇 Renew করুন:\n{renew_url}"
+                    + wa_footer()
+                )
+                send_fonnte_wa(client_phone, msg)
+                logger.info(f"Pause WA sent to {client_phone}")
             await query.edit_message_text(
-                f"⏸️ *Subscription #{sub_id} Paused!*\n\nClient এর access বন্ধ হয়েছে।\n\nResume করতে: `/sub email`",
+                f"⏸️ *Subscription #{sub_id} Paused!*\n\nClient এর access বন্ধ হয়েছে।\n"
+                f"{'✅ WhatsApp notification পাঠানো হয়েছে।' if client_phone else '⚠️ Phone নেই, WA পাঠানো যায়নি।'}\n\n"
+                f"Resume করতে: `/sub email`",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
                 parse_mode="Markdown")
         else:
@@ -1099,7 +1147,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ══════════════════════════════════════════
-    # ── UPDATED: Subscription Resume ──
+    # Subscription Resume — Confirm
     # ══════════════════════════════════════════
     elif data.startswith("sub_resume_confirm_"):
         sub_id = int(data.split("_")[3])
@@ -1111,10 +1159,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             items        = result.get("line_items", [])
             item_names   = ", ".join([i.get("name", "?") for i in items])
             client_email = result.get("billing", {}).get("email", "")
+            client_phone = result.get("billing", {}).get("phone", "")
+            client_name  = result.get("billing", {}).get("first_name", "প্রিয় গ্রাহক")
+            # ── WhatsApp notification ──
+            if client_phone:
+                msg = (
+                    f"━━━━━━━━━━━━━━━━━━\n✅ *Favourite Deals*\n━━━━━━━━━━━━━━━━━━\n\n"
+                    f"হ্যালো *{client_name}*! 🎉\n\n"
+                    f"আপনার subscription সফলভাবে *চালু* হয়েছে!\n\n"
+                    f"📦 Service: *{item_names}*\n"
+                    f"📅 পরবর্তী Renewal: *{next_show}*\n\n"
+                    f"🙏 আমাদের বেছে নেওয়ার জন্য ধন্যবাদ!"
+                    + wa_footer()
+                )
+                send_fonnte_wa(client_phone, msg)
+                logger.info(f"Resume WA sent to {client_phone}")
             await query.edit_message_text(
                 f"✅ *Subscription #{sub_id} Resume হয়েছে!*\n\n"
                 f"📦 {item_names}\n📧 {client_email}\n📅 পরবর্তী Renewal: {next_show}\n\n"
-                f"_Client কে WhatsApp notification গেছে।_",
+                f"{'✅ WhatsApp notification পাঠানো হয়েছে।' if client_phone else '⚠️ Phone নেই, WA পাঠানো যায়নি।'}",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
                 parse_mode="Markdown")
         else:
@@ -1547,7 +1610,6 @@ async def customer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += f"\n💰 *মোট: ৳{total_spent:.2f}*"
     await update.message.reply_text(text, parse_mode="Markdown")
 
-# ── UPDATED: subscription_command ──
 async def subscription_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("📋 Format: `/sub email@gmail.com`", parse_mode="Markdown"); return
