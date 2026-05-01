@@ -1042,7 +1042,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Subscription Renew — নতুন Flow ──
     # ══════════════════════════════════════════
     elif data.startswith("sub_renew_"):
-        sub_id = int(data.split("_")[2])
+        sub_id = int(data.split("_")[2]) if data.count("_") == 2 else int(data.split("_")[-1])
         # Sub info fetch করো
         sub_data = wc_get(f"subscriptions/{sub_id}")
         if not sub_data:
