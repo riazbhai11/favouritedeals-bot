@@ -1670,7 +1670,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-         elif data.startswith("sub_activate_") and not data.startswith("sub_activate_wc_"):
+        elif data.startswith("sub_activate_") and not data.startswith("sub_activate_wc_"):
             parts = data.split("_")
             item_id = int(parts[2])
             is_sub = len(parts) > 3 and parts[3] == "sub"
