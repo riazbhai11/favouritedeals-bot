@@ -1365,38 +1365,7 @@ def execute_function(name, args):
             return memory_get_all()
     except Exception as e:
         return {"error": str(e)}
-elif data.startswith("wc_status_"):
-    parts = data.split("_")
-    order_id = parts[2]
-    new_status = "_".join(parts[3:])
-    
-    status_label = {
-        "completed": "✅ Complete",
-        "cancelled": "❌ Cancel",
-        "on-hold": "🔄 On Hold",
-        "pending": "↩️ Pending"
-    }.get(new_status, new_status)
-    
-    resp = req.post(
-        f"{WP_URL}/wp-json/fdbot/v1/update-order-status",
-        headers={"X-FD-Secret": "fd_secret_2025"},
-        json={"order_id": int(order_id), "status": new_status},
-        timeout=10
-    )
-    result = resp.json()
-    if result.get("success"):
-        await query.edit_message_text(
-            f"✅ *Order #{order_id}*\nStatus → *{status_label}* হয়েছে!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-            parse_mode="Markdown"
-        )
-    else:
-        await query.edit_message_text(
-            f"❌ Update হয়নি!\n`{result.get('message', 'Unknown error')}`",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-            parse_mode="Markdown"
-        )
-    return
+
 
 def build_system_prompt():
     memories = memory_get_all()
@@ -2008,6 +1977,37 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"📩 Order #{order_id} ({order['reseller_code']}) কে কী message পাঠাবে?")
             return
 
+        if data.startswith("wc_status_"):
+            parts = data.split("_")
+            order_id = parts[2]
+            new_status = "_".join(parts[3:])
+            status_label = {
+                "completed": "✅ Complete",
+                "cancelled": "❌ Cancel",
+                "on-hold": "🔄 On Hold",
+                "pending": "↩️ Pending"
+            }.get(new_status, new_status)
+            resp = req.post(
+                f"{WP_URL}/wp-json/fdbot/v1/update-order-status",
+                headers={"X-FD-Secret": "fd_secret_2025"},
+                json={"order_id": int(order_id), "status": new_status},
+                timeout=10
+            )
+            result = resp.json()
+            if result.get("success"):
+                await query.edit_message_text(
+                    f"✅ *Order #{order_id}*\nStatus → *{status_label}* হয়েছে!",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
+                    parse_mode="Markdown"
+                )
+            else:
+                await query.edit_message_text(
+                    f"❌ Update হয়নি!\n`{result.get('message', 'Unknown error')}`",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
+                    parse_mode="Markdown"
+                )
+            return
+
         if data == "today_orders":
             await show_orders(query, days=1)
         elif data == "week_orders":
@@ -2386,7 +2386,14 @@ async def customer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
     if not rows:
-        await update.message.reply_text(f"❌ {email} এ কোনো order নেই।")
+        wc_orders = wc_get("orders", {"search": email, "per_page": 10})
+        if wc_orders and isinstance(wc_orders, list) and len(wc_orders) > 0:
+            text = f"📧 *{email}* — WooCommerce থেকে:\n\n"
+            for o in wc_orders:
+                text += f"🔸 #{o['id']} — ৳{o['total']} | {o['status']}\n"
+            await update.message.reply_text(text, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(f"❌ {email} এ কোনো order নেই।")
         return
 
     total_spent = sum(float(o[2]) for o in rows)
