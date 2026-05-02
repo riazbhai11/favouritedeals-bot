@@ -1503,7 +1503,7 @@ def main_menu_keyboard():
         [InlineKeyboardButton("👥 Reseller", callback_data="resellers"),
          InlineKeyboardButton("➕ Manual Income", callback_data="manual_income")],
         [InlineKeyboardButton("🔍 Customer খোঁজো", callback_data="search_customer"),
-         InlineKeyboardButton("⏳ Pending Orders", callback_data="pending_orders")],
+         InlineKeyboardButton("📋 Active Orders", callback_data="active_orders")],
         [InlineKeyboardButton("🛍️ Reseller Bot Orders আজ", callback_data="reseller_bot_orders_today")],
         [InlineKeyboardButton("💸 Due বাকি (Reseller)", callback_data="due_baki")],
         [InlineKeyboardButton("📋 Subscription Check", callback_data="sub_check"),
@@ -2214,6 +2214,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        elif data == "active_orders":
+            await show_active_orders(query)
         if data == "today_orders":
             await show_orders(query, days=1)
         elif data == "week_orders":
@@ -2391,6 +2393,35 @@ async def show_orders_by_status(query, status):
         total = o.get("total", "0")
         order_id = o.get("id")
         text += f"🔸 #{order_id} — {name}\n   💵 ৳{total} | {status}\n\n"
+        keyboard.append([InlineKeyboardButton(f"✏️ #{order_id} status", callback_data=f"wc_order_status_{order_id}")])
+    keyboard.append([InlineKeyboardButton("🔙 Menu", callback_data="menu")])
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+
+async def show_active_orders(query):
+    all_orders = []
+    for status in ["pending", "processing", "on-hold"]:
+        orders = wc_get("orders", {"status": status, "per_page": 20})
+        if orders and isinstance(orders, list):
+            all_orders.extend(orders)
+    all_orders.sort(key=lambda x: x.get("date_created", ""), reverse=True)
+    if not all_orders:
+        await query.edit_message_text(
+            "📋 কোনো active order নেই।",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]])
+        )
+        return
+    status_emoji = {"pending": "🕐", "processing": "⏳", "on-hold": "⏸️"}
+    text = f"📋 *Active Orders ({len(all_orders)}টা):*\n\n"
+    keyboard = []
+    for o in all_orders[:15]:
+        billing = o.get("billing", {})
+        name = f"{billing.get('first_name', '')} {billing.get('last_name', '')}".strip() or "Unknown"
+        total = o.get("total", "0")
+        order_id = o.get("id")
+        status = o.get("status", "")
+        emoji = status_emoji.get(status, "❓")
+        text += f"{emoji} #{order_id} — {name}\n   💵 ৳{total} | {status}\n\n"
         keyboard.append([InlineKeyboardButton(f"✏️ #{order_id} status", callback_data=f"wc_order_status_{order_id}")])
     keyboard.append([InlineKeyboardButton("🔙 Menu", callback_data="menu")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
