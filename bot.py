@@ -1877,6 +1877,42 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        elif data.startswith("sub_activate_wc_"):
+            sub_id = tail_int(data)
+            await query.edit_message_text(f"⏳ Subscription #{sub_id} activate করছি...")
+            result = wc_put(f"subscriptions/{sub_id}", {"status": "active"})
+            if result and result.get("status") == "active":
+                next_date = result.get("next_payment_date_gmt", "")[:10] or "N/A"
+                items = result.get("line_items", [])
+                item_names = ", ".join([i.get("name", "?") for i in items])
+                client_phone = result.get("billing", {}).get("phone", "")
+                client_name = result.get("billing", {}).get("first_name", "প্রিয় গ্রাহক")
+                if client_phone:
+                    msg = (
+                        f"━━━━━━━━━━━━━━━━━━\n✅ *Favourite Deals*\n━━━━━━━━━━━━━━━━━━\n\n"
+                        f"হ্যালো *{client_name}*! 🎉\n\n"
+                        f"আপনার subscription সফলভাবে *চালু* হয়েছে!\n\n"
+                        f"📦 Service: *{item_names}*\n"
+                        f"📅 পরবর্তী Renewal: *{next_date}*\n\n"
+                        f"🙏 ধন্যবাদ!"
+                        + wa_footer()
+                    )
+                    send_fonnte_wa(client_phone, msg)
+                await query.edit_message_text(
+                    f"✅ *Subscription #{sub_id} Active হয়েছে!*\n\n"
+                    f"📦 {item_names}\n"
+                    f"📅 Next Renewal: {next_date}\n\n"
+                    f"{'✅ Client কে WhatsApp পাঠানো হয়েছে।' if client_phone else '⚠️ Phone নেই।'}",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
+                    parse_mode="Markdown"
+                )
+            else:
+                await query.edit_message_text(
+                    f"❌ Activate হয়নি। WooCommerce dashboard এ manually করো.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]])
+                )
+            return
+
         elif data.startswith("sub_cancel_confirm_"):
             sub_id = tail_int(data)
             result = wc_put(f"subscriptions/{sub_id}", {"status": "cancelled"})
@@ -2385,22 +2421,39 @@ async def customer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         conn.close()
 
-    if not rows:
-        wc_orders = wc_get("orders", {"search": email, "per_page": 10})
-        if wc_orders and isinstance(wc_orders, list) and len(wc_orders) > 0:
-            text = f"📧 *{email}* — WooCommerce থেকে:\n\n"
-            for o in wc_orders:
-                text += f"🔸 #{o['id']} — ৳{o['total']} | {o['status']}\n"
-            await update.message.reply_text(text, parse_mode="Markdown")
-        else:
-            await update.message.reply_text(f"❌ {email} এ কোনো order নেই।")
+    # WooCommerce API থেকে সব orders আনো
+    wc_orders = wc_get("orders", {"search": email, "per_page": 20})
+    wc_list = []
+    if wc_orders and isinstance(wc_orders, list):
+        wc_list = [o for o in wc_orders if o.get("billing", {}).get("email", "").lower() == email.lower()]
+
+    if not rows and not wc_list:
+        await update.message.reply_text(f"❌ {email} এ কোনো order নেই।")
         return
 
-    total_spent = sum(float(o[2]) for o in rows)
-    text = f"👤 *{rows[0][1]}*\n📧 {email}\n\n"
-    for o in rows:
-        emoji = "✅" if o[3] == "completed" else "⏳" if o[3] == "processing" else "❌"
-        text += f"{emoji} #{o[0]} — {o[4].strftime('%d %b %Y')} | ৳{o[2]} | {o[3]}\n"
+    # DB orders
+    db_ids = set()
+    text = f"👤 *{rows[0][1] if rows else email}*\n📧 {email}\n\n"
+    total_spent = 0
+
+    if rows:
+        text += "📦 *DB Orders:*\n"
+        for o in rows:
+            emoji = "✅" if o[3] == "completed" else "⏳" if o[3] == "processing" else "❌"
+            text += f"{emoji} #{o[0]} — {o[4].strftime('%d %b %Y')} | ৳{o[2]} | {o[3]}\n"
+            total_spent += float(o[2])
+            db_ids.add(str(o[0]))
+
+    # WC API orders (DB তে নেই এমন)
+    extra = [o for o in wc_list if str(o["id"]) not in db_ids]
+    if extra:
+        text += "\n🌐 *WooCommerce Orders:*\n"
+        for o in extra:
+            status = o.get("status", "?")
+            emoji = "✅" if status == "completed" else "⏳" if status == "processing" else "❌"
+            text += f"{emoji} #{o['id']} — ৳{o['total']} | {status}\n"
+            total_spent += float(o.get("total", 0))
+
     text += f"\n💰 *মোট: ৳{total_spent:.2f}*"
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -2429,10 +2482,13 @@ async def subscription_command(update: Update, context: ContextTypes.DEFAULT_TYP
         text += format_subscription_text(sub) + "\n"
 
         row = []
-        if status == "on-hold":
+        if status == "pending":
+            row.append(InlineKeyboardButton(f"✅ #{sub_id} Activate", callback_data=f"sub_activate_wc_{sub_id}"))
+            row.append(InlineKeyboardButton(f"❌ #{sub_id} Cancel", callback_data=f"sub_cancel_{sub_id}"))
+        elif status == "on-hold":
             row.append(InlineKeyboardButton(f"▶️ #{sub_id} Resume", callback_data=f"sub_resume_{sub_id}"))
             row.append(InlineKeyboardButton(f"❌ #{sub_id} Cancel", callback_data=f"sub_cancel_{sub_id}"))
-        elif status in ["active", "pending"]:
+        elif status == "active":
             row.append(InlineKeyboardButton(f"⏸️ #{sub_id} Pause", callback_data=f"sub_pause_{sub_id}"))
             row.append(InlineKeyboardButton(f"🔄 #{sub_id} Renew", callback_data=f"sub_renew_{sub_id}"))
         elif status in ["cancelled", "expired"]:
