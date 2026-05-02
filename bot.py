@@ -1370,6 +1370,13 @@ elif data.startswith("wc_status_"):
     order_id = parts[2]
     new_status = "_".join(parts[3:])
     
+    status_label = {
+        "completed": "✅ Complete",
+        "cancelled": "❌ Cancel",
+        "on-hold": "🔄 On Hold",
+        "pending": "↩️ Pending"
+    }.get(new_status, new_status)
+    
     resp = req.post(
         f"{WP_URL}/wp-json/fdbot/v1/update-order-status",
         headers={"X-FD-Secret": "fd_secret_2025"},
@@ -1379,12 +1386,17 @@ elif data.startswith("wc_status_"):
     result = resp.json()
     if result.get("success"):
         await query.edit_message_text(
-            f"✅ Order #{order_id} → *{new_status}*",
+            f"✅ *Order #{order_id}*\nStatus → *{status_label}* হয়েছে!",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
             parse_mode="Markdown"
         )
     else:
-        await query.edit_message_text(f"❌ Update হয়নি: {result.get('message')}")
+        await query.edit_message_text(
+            f"❌ Update হয়নি!\n`{result.get('message', 'Unknown error')}`",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
+            parse_mode="Markdown"
+        )
+    return
 
 def build_system_prompt():
     memories = memory_get_all()
