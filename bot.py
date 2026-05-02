@@ -220,6 +220,18 @@ def setup_db():
             value TEXT,
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW())""")
+
+        conn.run("""CREATE TABLE IF NOT EXISTS order_payment_due (
+            id SERIAL PRIMARY KEY,
+            woo_order_id VARCHAR(50) UNIQUE,
+            customer_name VARCHAR(200),
+            customer_phone VARCHAR(50),
+            item_names TEXT,
+            amount DECIMAL(10,2),
+            reminder_count INTEGER DEFAULT 0,
+            last_reminded_at TIMESTAMP,
+            cleared_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT NOW())""")
     finally:
         conn.close()
     logger.info("✅ Database setup complete!")
@@ -1314,6 +1326,69 @@ async def send_subscription_due_reminders():
             logger.error(f"Subscription due reminder loop error: {e}")
 
 
+async def send_order_payment_due_reminders():
+    while True:
+        await asyncio.sleep(60 * 60)
+        try:
+            conn = get_db()
+            try:
+                rows = conn.run("""
+                    SELECT woo_order_id, customer_name, customer_phone, item_names, amount, reminder_count, last_reminded_at
+                    FROM order_payment_due
+                    WHERE cleared_at IS NULL
+                """)
+            finally:
+                conn.close()
+            now = datetime.utcnow()
+            for row in rows:
+                last = row[6]
+                if last and (now - last) < timedelta(hours=12):
+                    continue
+                phone = row[2]
+                name = row[1]
+                item_names = row[3]
+                amount = str(row[4])
+                count = (row[5] or 0) + 1
+                wa_msg = (
+                    f"━━━━━━━━━━━━━━━━━━\n💳 *Favourite Deals*\n━━━━━━━━━━━━━━━━━━\n\n"
+                    f"হ্যালো *{name}*,\n\n"
+                    f"আপনার order এর payment এখনো বাকি আছে।\n🔁 Reminder #{count}\n\n"
+                    f"📦 Product: *{item_names}*\n"
+                    f"💵 Amount: *৳{amount}*\n\n"
+                    f"দয়া করে payment complete করুন।"
+                    + wa_footer()
+                )
+                send_fonnte_wa(phone, wa_msg)
+                try:
+                    from telegram import Bot
+                    kb = [[InlineKeyboardButton("✅ টাকা পেয়েছি", callback_data=f"order_due_paid_{row[0]}")]]
+                    await Bot(token=BOT_TOKEN).send_message(
+                        chat_id=MAIN_CHAT_ID,
+                        text=(
+                            f"⏰ *Order Payment Reminder #{count}*\n\n"
+                            f"Order #{row[0]}\n"
+                            f"👤 {name}\n"
+                            f"📦 {item_names}\n"
+                            f"💵 ৳{amount} বাকি"
+                        ),
+                        reply_markup=InlineKeyboardMarkup(kb),
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    logger.error(f"Order due admin notify error: {e}")
+                conn2 = get_db()
+                try:
+                    conn2.run("""
+                        UPDATE order_payment_due
+                        SET reminder_count = reminder_count + 1, last_reminded_at = NOW()
+                        WHERE woo_order_id = :oid
+                    """, oid=row[0])
+                finally:
+                    conn2.close()
+        except Exception as e:
+            logger.error(f"Order payment due reminder loop error: {e}")
+
+
 AI_FUNCTIONS = [
     {"name": "get_recent_orders", "description": "Recent WooCommerce orders", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}, "status": {"type": "string"}}}},
     {"name": "get_last_order", "description": "WooCommerce er sorboshesh order", "parameters": {"type": "object", "properties": {}}},
@@ -2044,6 +2119,101 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             return
 
+        elif data.startswith("wc_order_status_"):
+            order_id = int(data.split("_")[3])
+            keyboard = [
+                [InlineKeyboardButton("⏳ Processing", callback_data=f"wc_setstatus_{order_id}_processing")],
+                [InlineKeyboardButton("✅ Completed", callback_data=f"wc_setstatus_{order_id}_completed")],
+                [InlineKeyboardButton("💳 Payment Pending", callback_data=f"wc_setstatus_{order_id}_pending")],
+                [InlineKeyboardButton("❌ Cancelled", callback_data=f"wc_setstatus_{order_id}_cancelled")],
+                [InlineKeyboardButton("🔙 Back", callback_data="pending_orders")]
+            ]
+            await query.edit_message_text(
+                f"✏️ Order #{order_id} এর নতুন status:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+
+        elif data.startswith("wc_setstatus_"):
+            parts = data.split("_")
+            order_id = int(parts[2])
+            new_status = parts[3]
+            result = wc_put(f"orders/{order_id}", {"status": new_status})
+            if result and result.get("status") == new_status:
+                phone = ""
+                if new_status == "pending":
+                    order = wc_get(f"orders/{order_id}")
+                    if order:
+                        billing = order.get("billing", {})
+                        phone = billing.get("phone", "")
+                        name = billing.get("first_name", "প্রিয় গ্রাহক")
+                        items = order.get("line_items", [])
+                        item_names = ", ".join([i.get("name", "?") for i in items])
+                        total = order.get("total", "0")
+                        if phone:
+                            wa_msg = (
+                                f"━━━━━━━━━━━━━━━━━━\n💳 *Favourite Deals*\n━━━━━━━━━━━━━━━━━━\n\n"
+                                f"হ্যালো *{name}*,\n\n"
+                                f"আপনার order এর payment এখনো বাকি আছে।\n\n"
+                                f"📦 Product: *{item_names}*\n"
+                                f"💵 Amount: *৳{total}*\n\n"
+                                f"দয়া করে payment complete করুন।"
+                                + wa_footer()
+                            )
+                            send_fonnte_wa(phone, wa_msg)
+                            conn = get_db()
+                            try:
+                                conn.run("""INSERT INTO order_payment_due
+                                    (woo_order_id, customer_name, customer_phone, item_names, amount, reminder_count, last_reminded_at)
+                                    VALUES (:oid, :n, :p, :items, :amt, 0, NOW())
+                                    ON CONFLICT (woo_order_id) DO UPDATE SET
+                                        reminder_count=0, last_reminded_at=NOW(), cleared_at=NULL
+                                """, oid=str(order_id), n=name, p=phone, items=item_names, amt=float(total))
+                            except Exception as e:
+                                logger.error(f"Order payment due save error: {e}")
+                            finally:
+                                conn.close()
+                            from telegram import Bot
+                            kb = [[InlineKeyboardButton("✅ টাকা পেয়েছি", callback_data=f"order_due_paid_{order_id}")]]
+                            await Bot(token=BOT_TOKEN).send_message(
+                                chat_id=MAIN_CHAT_ID,
+                                text=(
+                                    f"💰 *Order Payment Due*\n\n"
+                                    f"Order #{order_id}\n"
+                                    f"👤 {name}\n"
+                                    f"📦 {item_names}\n"
+                                    f"💵 ৳{total}\n\n"
+                                    f"Payment পেলে button press করো।"
+                                ),
+                                reply_markup=InlineKeyboardMarkup(kb),
+                                parse_mode="Markdown"
+                            )
+                await query.edit_message_text(
+                    f"✅ *Order #{order_id}*\nStatus → *{new_status}* হয়েছে!\n\n{'✅ Client কে WhatsApp পাঠানো হয়েছে।' if new_status == 'pending' and phone else ''}",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
+                    parse_mode="Markdown"
+                )
+            else:
+                await query.edit_message_text(
+                    "❌ Update হয়নি।",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]])
+                )
+            return
+
+        elif data.startswith("order_due_paid_"):
+            order_id = data.split("_")[3]
+            conn = get_db()
+            try:
+                conn.run("UPDATE order_payment_due SET cleared_at=NOW() WHERE woo_order_id=:oid", oid=str(order_id))
+            finally:
+                conn.close()
+            await query.edit_message_text(
+                f"✅ *Order #{order_id}*\n\nPayment due reminder বন্ধ করা হয়েছে।",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
+                parse_mode="Markdown"
+            )
+            return
+
         if data == "today_orders":
             await show_orders(query, days=1)
         elif data == "week_orders":
@@ -2206,29 +2376,23 @@ async def show_orders(query, days=1):
 
 
 async def show_orders_by_status(query, status):
-    conn = get_db()
-    try:
-        rows = conn.run(
-            "SELECT id,woo_order_id,customer_name,total,status FROM orders WHERE status=:s ORDER BY created_at DESC LIMIT 10",
-            s=status
-        )
-    finally:
-        conn.close()
-
-    if not rows:
+    wc_orders = wc_get("orders", {"status": status, "per_page": 20})
+    if not wc_orders or not isinstance(wc_orders, list) or len(wc_orders) == 0:
         await query.edit_message_text(
             f"📦 {status} status e kono order nei.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]])
         )
         return
-
-    text = f"📦 *{status} orders ({len(rows)}ta):*\n\n"
+    text = f"📦 *{status} orders ({len(wc_orders)}টা):*\n\n"
     keyboard = []
-    for o in rows[:10]:
-        text += f"🔸 #{o[1]} — {o[2]}\n   💵 ৳{o[3]} | {o[4]}\n\n"
-        keyboard.append([InlineKeyboardButton(f"✏️ #{o[1]} status", callback_data=f"status_{o[0]}")])
+    for o in wc_orders[:10]:
+        billing = o.get("billing", {})
+        name = f"{billing.get('first_name', '')} {billing.get('last_name', '')}".strip() or "Unknown"
+        total = o.get("total", "0")
+        order_id = o.get("id")
+        text += f"🔸 #{order_id} — {name}\n   💵 ৳{total} | {status}\n\n"
+        keyboard.append([InlineKeyboardButton(f"✏️ #{order_id} status", callback_data=f"wc_order_status_{order_id}")])
     keyboard.append([InlineKeyboardButton("🔙 Menu", callback_data="menu")])
-
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
@@ -3306,6 +3470,7 @@ async def main():
         await reseller_app.updater.start_polling()
         asyncio.create_task(send_payment_reminders())
         asyncio.create_task(send_subscription_due_reminders())
+        asyncio.create_task(send_order_payment_due_reminders())
         await asyncio.Event().wait()
 
 
