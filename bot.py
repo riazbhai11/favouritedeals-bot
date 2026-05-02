@@ -1670,32 +1670,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        elif data.startswith("sub_activate_") and not data.startswith("sub_activate_wc_"):
-            parts = data.split("_")
-            item_id = int(parts[2])
-            is_sub = len(parts) > 3 and parts[3] == "sub"
-            await query.edit_message_text(f"⏳ #{item_id} activate করছি...")
-
-            if is_sub:
-                result = wc_put(f"subscriptions/{item_id}", {"status": "active"})
-            else:
-                result = wc_put(f"orders/{item_id}", {"status": "completed"})
-
-            if result and result.get("status") in ["active", "completed"]:
-                await query.edit_message_text(
-                    f"✅ *#{item_id} Activated!*\n\nClient এর subscription চালু হয়ে গেছে। 🎉",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-                    parse_mode="Markdown"
-                )
-            else:
-                await query.edit_message_text(
-                    f"❌ Activate হয়নি।\n\nWooCommerce dashboard এ manually করো:\n"
-                    f"{'Subscriptions' if is_sub else 'Orders'} → #{item_id} → Status: Active/Completed",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-                    parse_mode="Markdown"
-                )
-            return
-
         elif data.startswith("sub_pause_confirm_"):
             sub_id = tail_int(data)
             result = wc_put(f"subscriptions/{sub_id}", {"status": "on-hold"})
@@ -1910,6 +1884,32 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(
                     f"❌ Activate হয়নি। WooCommerce dashboard এ manually করো.",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]])
+                )
+            return
+
+        elif data.startswith("sub_activate_") and not data.startswith("sub_activate_wc_"):
+            parts = data.split("_")
+            item_id = int(parts[2])
+            is_sub = len(parts) > 3 and parts[3] == "sub"
+            await query.edit_message_text(f"⏳ #{item_id} activate করছি...")
+
+            if is_sub:
+                result = wc_put(f"subscriptions/{item_id}", {"status": "active"})
+            else:
+                result = wc_put(f"orders/{item_id}", {"status": "completed"})
+
+            if result and result.get("status") in ["active", "completed"]:
+                await query.edit_message_text(
+                    f"✅ *#{item_id} Activated!*\n\nClient এর subscription চালু হয়ে গেছে। 🎉",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
+                    parse_mode="Markdown"
+                )
+            else:
+                await query.edit_message_text(
+                    f"❌ Activate হয়নি।\n\nWooCommerce dashboard এ manually করো:\n"
+                    f"{'Subscriptions' if is_sub else 'Orders'} → #{item_id} → Status: Active/Completed",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
+                    parse_mode="Markdown"
                 )
             return
 
