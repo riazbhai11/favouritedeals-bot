@@ -1365,7 +1365,26 @@ def execute_function(name, args):
             return memory_get_all()
     except Exception as e:
         return {"error": str(e)}
-
+elif data.startswith("wc_status_"):
+    parts = data.split("_")
+    order_id = parts[2]
+    new_status = "_".join(parts[3:])
+    
+    resp = req.post(
+        f"{WP_URL}/wp-json/fdbot/v1/update-order-status",
+        headers={"X-FD-Secret": "fd_secret_2025"},
+        json={"order_id": int(order_id), "status": new_status},
+        timeout=10
+    )
+    result = resp.json()
+    if result.get("success"):
+        await query.edit_message_text(
+            f"✅ Order #{order_id} → *{new_status}*",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
+            parse_mode="Markdown"
+        )
+    else:
+        await query.edit_message_text(f"❌ Update হয়নি: {result.get('message')}")
 
 def build_system_prompt():
     memories = memory_get_all()
