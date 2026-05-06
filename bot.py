@@ -2143,17 +2143,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 subs = get_subscriptions_by_email(email) if email else []
                 if subs:
-                    order_wc = wc_get(f"orders/{order_id}") or {}
-                    order_items = order_wc.get("line_items", [])
-                    order_product_ids = [i.get("product_id") for i in order_items]
-
                     sub = subs[0]
-                    for s in subs:
-                        s_items = s.get("line_items", [])
-                        s_product_ids = [i.get("product_id") for i in s_items]
-                        if any(pid in order_product_ids for pid in s_product_ids):
-                            sub = s
-                            break
                     sub_id = sub.get("id")
                     items = sub.get("line_items", [])
                     item_names = ", ".join([i.get("name", "?") for i in items]) or "Subscription"
@@ -2161,9 +2151,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     name = f"{sub_billing.get('first_name', '')} {sub_billing.get('last_name', '')}".strip() or order_name
                     phone = sub_billing.get("phone", "") or order_phone
                     next_dt = add_one_month(parse_wc_dt(sub.get("next_payment_date_gmt", "")))
-                    wc_set_bot_controlled(sub_id, True)
                     wp_subscription_renew(sub_id, next_dt, status="active")
-                    wc_set_bot_controlled(sub_id, False)
                     next_show = next_dt.strftime("%d/%m/%Y")
 
                     msg = (
@@ -2204,17 +2192,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 subs = get_subscriptions_by_email(email) if email else []
                 if subs:
-                    order_wc = wc_get(f"orders/{order_id}") or {}
-                    order_items = order_wc.get("line_items", [])
-                    order_product_ids = [i.get("product_id") for i in order_items]
-
                     sub = subs[0]
-                    for s in subs:
-                        s_items = s.get("line_items", [])
-                        s_product_ids = [i.get("product_id") for i in s_items]
-                        if any(pid in order_product_ids for pid in s_product_ids):
-                            sub = s
-                            break
                     sub_id = sub.get("id")
                     items = sub.get("line_items", [])
                     item_names = ", ".join([i.get("name", "?") for i in items]) or "Subscription"
@@ -2222,9 +2200,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     name = f"{sub_billing.get('first_name', '')} {sub_billing.get('last_name', '')}".strip() or order_name
                     phone = sub_billing.get("phone", "") or order_phone
                     next_dt = add_one_month(parse_wc_dt(sub.get("next_payment_date_gmt", "")))
-                    wc_set_bot_controlled(sub_id, True)
                     wp_subscription_renew(sub_id, next_dt, status="active")
-                    wc_set_bot_controlled(sub_id, False)
                     next_show = next_dt.strftime("%d/%m/%Y")
                     upsert_sub_payment_due(sub_id, name, email, phone, item_names, next_dt)
 
@@ -3572,8 +3548,7 @@ def woocommerce_webhook():
             f"💵 ৳{total}\n"
             f"📊 {status}"
         )
-        order_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("📋 Active Orders", callback_data="active_orders")]])
-        asyncio.run_coroutine_threadsafe(send_telegram_message(msg, reply_markup=order_keyboard), main_loop)
+        asyncio.run_coroutine_threadsafe(send_telegram_message(msg), main_loop)
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         logger.error(f"Webhook error: {e}")
@@ -3585,9 +3560,9 @@ def health():
     return jsonify({"status": "running", "bkash": BKASH_NUMBER}), 200
 
 
-async def send_telegram_message(message, reply_markup=None):
+async def send_telegram_message(message):
     from telegram import Bot
-    await Bot(token=BOT_TOKEN).send_message(chat_id=CHAT_ID, text=message, parse_mode="Markdown", reply_markup=reply_markup)
+    await Bot(token=BOT_TOKEN).send_message(chat_id=CHAT_ID, text=message, parse_mode="Markdown")
 
 
 def run_flask():
