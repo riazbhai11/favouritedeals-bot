@@ -2143,7 +2143,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 subs = get_subscriptions_by_email(email) if email else []
                 if subs:
+                    order_wc = wc_get(f"orders/{order_id}") or {}
+                    order_items = order_wc.get("line_items", [])
+                    order_product_ids = [i.get("product_id") for i in order_items]
+
                     sub = subs[0]
+                    for s in subs:
+                        s_items = s.get("line_items", [])
+                        s_product_ids = [i.get("product_id") for i in s_items]
+                        if any(pid in order_product_ids for pid in s_product_ids):
+                            sub = s
+                            break
                     sub_id = sub.get("id")
                     items = sub.get("line_items", [])
                     item_names = ", ".join([i.get("name", "?") for i in items]) or "Subscription"
@@ -2194,7 +2204,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 subs = get_subscriptions_by_email(email) if email else []
                 if subs:
+                    order_wc = wc_get(f"orders/{order_id}") or {}
+                    order_items = order_wc.get("line_items", [])
+                    order_product_ids = [i.get("product_id") for i in order_items]
+
                     sub = subs[0]
+                    for s in subs:
+                        s_items = s.get("line_items", [])
+                        s_product_ids = [i.get("product_id") for i in s_items]
+                        if any(pid in order_product_ids for pid in s_product_ids):
+                            sub = s
+                            break
                     sub_id = sub.get("id")
                     items = sub.get("line_items", [])
                     item_names = ", ".join([i.get("name", "?") for i in items]) or "Subscription"
