@@ -1,4 +1,4 @@
-```python
+python
 import os
 import logging
 import pg8000.native
@@ -3624,4 +3624,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-```
