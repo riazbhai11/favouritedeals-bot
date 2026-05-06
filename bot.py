@@ -1,3 +1,4 @@
+```python
 import os
 import logging
 import pg8000.native
@@ -1753,7 +1754,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 plist = ", ".join([i.get("name", "?") for i in items])
                 client_phone = result.get("billing", {}).get("phone", "")
                 client_name = result.get("billing", {}).get("first_name", "প্রিয় গ্রাহক")
-                renew_url = "https://favouritedeals.online/my-account/subscriptions/"
 
                 if client_phone:
                     msg = (
@@ -1761,8 +1761,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"হ্যালো *{client_name}*,\n\nআপনার subscription *pause* হয়ে গেছে।\n\n"
                         f"📦 Service: *{plist}*\n"
                         f"📅 তারিখ: *{datetime.now().strftime('%d/%m/%Y')}*\n\n"
-                        f"🔄 Renew করলেই service আবার চালু হবে!\n\n"
-                        f"👇 Renew করুন:\n{renew_url}"
+                        f"🔄 Renew করলেই service আবার চালু হবে!"
                         + wa_footer()
                     )
                     send_fonnte_wa(client_phone, msg)
@@ -1983,8 +1982,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(
                     f"❌ Activate হয়নি।\n\nWooCommerce dashboard এ manually করো:\n"
                     f"{'Subscriptions' if is_sub else 'Orders'} → #{item_id} → Status: Active/Completed",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]),
-                    parse_mode="Markdown"
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]])
                 )
             return
 
@@ -2134,10 +2132,129 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        elif data.startswith("wc_paid_yes_"):
+            order_id = tail_int(data)
+            result = wc_put(f"orders/{order_id}", {"status": "completed"})
+            if result and result.get("status") == "completed":
+                order = wc_get(f"orders/{order_id}") or {}
+                billing = order.get("billing", {})
+                email = billing.get("email", "")
+                order_name = f"{billing.get('first_name', '')} {billing.get('last_name', '')}".strip() or "প্রিয় গ্রাহক"
+                order_phone = billing.get("phone", "")
+
+                subs = get_subscriptions_by_email(email) if email else []
+                if subs:
+                    sub = subs[0]
+                    sub_id = sub.get("id")
+                    items = sub.get("line_items", [])
+                    item_names = ", ".join([i.get("name", "?") for i in items]) or "Subscription"
+                    sub_billing = sub.get("billing", {})
+                    name = f"{sub_billing.get('first_name', '')} {sub_billing.get('last_name', '')}".strip() or order_name
+                    phone = sub_billing.get("phone", "") or order_phone
+                    next_dt = add_one_month(parse_wc_dt(sub.get("next_payment_date_gmt", "")))
+                    wp_subscription_renew(sub_id, next_dt, status="active")
+                    next_show = next_dt.strftime("%d/%m/%Y")
+
+                    msg = (
+                        f"━━━━━━━━━━━━━━━━━━\n✅ *Favourite Deals*\n━━━━━━━━━━━━━━━━━━\n\n"
+                        f"হ্যালো *{name}*! 🎉\n\n"
+                        f"আপনার subscription সফলভাবে *চালু* হয়েছে!\n\n"
+                        f"📦 Service: *{item_names}*\n"
+                        f"📅 পরবর্তী Renewal: *{next_show}*\n\n"
+                        f"🙏 ধন্যবাদ!"
+                        + wa_footer()
+                    )
+                    if phone:
+                        send_fonnte_wa(phone, msg)
+
+                    await query.edit_message_text(
+                        f"✅ Order #{order_id} complete! Subscription active হয়েছে। Client কে WhatsApp পাঠানো হয়েছে।"
+                    )
+                else:
+                    await query.edit_message_text(
+                        f"✅ Order #{order_id} complete! (Subscription পাওয়া যায়নি)"
+                    )
+            else:
+                await query.edit_message_text(
+                    "❌ Update হয়নি।",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]])
+                )
+            return
+
+        elif data.startswith("wc_paid_no_"):
+            order_id = tail_int(data)
+            result = wc_put(f"orders/{order_id}", {"status": "completed"})
+            if result and result.get("status") == "completed":
+                order = wc_get(f"orders/{order_id}") or {}
+                billing = order.get("billing", {})
+                email = billing.get("email", "")
+                order_name = f"{billing.get('first_name', '')} {billing.get('last_name', '')}".strip() or "প্রিয় গ্রাহক"
+                order_phone = billing.get("phone", "")
+
+                subs = get_subscriptions_by_email(email) if email else []
+                if subs:
+                    sub = subs[0]
+                    sub_id = sub.get("id")
+                    items = sub.get("line_items", [])
+                    item_names = ", ".join([i.get("name", "?") for i in items]) or "Subscription"
+                    sub_billing = sub.get("billing", {})
+                    name = f"{sub_billing.get('first_name', '')} {sub_billing.get('last_name', '')}".strip() or order_name
+                    phone = sub_billing.get("phone", "") or order_phone
+                    next_dt = add_one_month(parse_wc_dt(sub.get("next_payment_date_gmt", "")))
+                    wp_subscription_renew(sub_id, next_dt, status="active")
+                    next_show = next_dt.strftime("%d/%m/%Y")
+                    upsert_sub_payment_due(sub_id, name, email, phone, item_names, next_dt)
+
+                    msg = (
+                        f"━━━━━━━━━━━━━━━━━━\n⚠️ *Favourite Deals*\n━━━━━━━━━━━━━━━━━━\n\n"
+                        f"হ্যালো *{name}*! 👋\n\n"
+                        f"আপনার subscription *চালু* হয়েছে!\n\n"
+                        f"📦 Service: *{item_names}*\n"
+                        f"📅 পরবর্তী Renewal: *{next_show}*\n\n"
+                        f"💳 Payment এখনো বাকি আছে। অনুগ্রহ করে payment করুন।"
+                        + wa_footer()
+                    )
+                    if phone:
+                        send_fonnte_wa(phone, msg)
+
+                    kb = [[InlineKeyboardButton("✅ টাকা পেয়েছি", callback_data=f"sub_due_paid_{sub_id}")]]
+                    await query.edit_message_text(
+                        text=(
+                            f"💰 Subscription #{sub_id} active হয়েছে কিন্তু payment বাকি。\n"
+                            f"👤 {name}\n"
+                            f"📦 {item_names}\n"
+                            f"📅 Next: {next_show}\n\n"
+                            f"12 ঘণ্টা পর reminder যাবে।"
+                        ).replace("。", "।"),
+                        reply_markup=InlineKeyboardMarkup(kb)
+                    )
+                else:
+                    await query.edit_message_text(
+                        "✅ Order complete! (Subscription পাওয়া যায়নি, payment due track করা গেলো না)"
+                    )
+            else:
+                await query.edit_message_text(
+                    "❌ Update হয়নি।",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]])
+                )
+            return
+
         elif data.startswith("wc_setstatus_"):
             parts = data.split("_")
             order_id = int(parts[2])
             new_status = parts[3]
+
+            if new_status == "completed":
+                keyboard = [
+                    [InlineKeyboardButton("✅ টাকা পেয়েছি", callback_data=f"wc_paid_yes_{order_id}")],
+                    [InlineKeyboardButton("❌ এখনো পাইনি", callback_data=f"wc_paid_no_{order_id}")]
+                ]
+                await query.edit_message_text(
+                    f"💳 Order #{order_id} — টাকা পেয়েছো?",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                return
+
             result = wc_put(f"orders/{order_id}", {"status": new_status})
             if result and result.get("status") == new_status:
                 phone = ""
@@ -3507,3 +3624,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+```
