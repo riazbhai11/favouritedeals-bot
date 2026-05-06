@@ -1,4 +1,3 @@
-python
 import os
 import logging
 import pg8000.native
