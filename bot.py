@@ -1057,7 +1057,7 @@ def woocommerce_webhook():
 
 async def send_order_notification(message, order_id):
     from telegram import Bot
-    kb = [[InlineKeyboardButton("📋 Active Orders", callback_data="active_orders")]]
+    kb = [[InlineKeyboardButton("📋 Active Orders দেখো", callback_data="active_orders")]]
     await Bot(token=BOT_TOKEN).send_message(
         chat_id=CHAT_ID,
         text=message,
