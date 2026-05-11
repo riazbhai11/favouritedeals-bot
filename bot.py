@@ -455,11 +455,9 @@ async def activate_subscription_for_order(order_id, paid):
     sub_id     = sub.get("id")
     item_names = ", ".join([i.get("name", "?") for i in sub.get("line_items", [])]) or "Subscription"
 
-    # Next payment date calculate
-    base_dt = parse_wc_dt(sub.get("next_payment_date_gmt", ""))
-    if base_dt < datetime.utcnow():
-        base_dt = datetime.utcnow()
-    next_dt   = add_one_month(base_dt)
+    # Next payment date — WooCommerce এর date directly নাও (add_one_month করা লাগবে না)
+    raw_next  = sub.get("next_payment_date_gmt", "")
+    next_dt   = parse_wc_dt(raw_next) if raw_next else add_one_month(datetime.utcnow())
     next_show = next_dt.strftime("%d/%m/%Y")
 
     # WooCommerce order → completed
