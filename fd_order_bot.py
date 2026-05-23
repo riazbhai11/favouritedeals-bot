@@ -220,6 +220,12 @@ async def do_order():
             if await verify.count() > 0:
                 await verify.fill("VERIFY_EMAIL")
                 print("Verify email filled!")
+                await asyncio.sleep(1)
+                verify_btn = page.locator("button:has-text('VERIFY ACCESS')")
+                if await verify_btn.count() > 0:
+                    await verify_btn.first.click()
+                    print("Verify button clicked!")
+                    await asyncio.sleep(2)
         except Exception as e:
             print("Verify email error:", e)
 
