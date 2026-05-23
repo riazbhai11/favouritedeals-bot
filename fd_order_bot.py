@@ -496,27 +496,32 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if success:
         client_msg = (
-            "আপনার order সফলভাবে তৈরি হয়েছে! ✅\n\n"
-            "নিচের তথ্য দিয়ে আমাদের website এ login করে আপনার subscription details দেখতে পারবেন:\n\n"
-            f"🌐 Website: favouritedeals.online\n"
-            f"📧 Email: {email}\n\n"
-            "👉 Login করুন → My Account → My Subscriptions\n\n"
-            "⚠️ Login করতে আপনার WhatsApp নম্বরে OTP আসবে।\n"
-            "OTP দিয়ে verify করলেই subscription details দেখতে পাবেন।"
+            f"আসসালামুয়ালাইকুম! 👋\n\n"
+            f"আপনার order সফলভাবে তৈরি হয়েছে! ✅\n\n"
+            f"নিচের তথ্য দিয়ে আমাদের website এ login করুন:\n\n"
+            f"🌐 https://favouritedeals.online/\n"
+            f"📧 Email: {email}\n"
+            f"📱 WhatsApp: {phone}\n\n"
+            f"👉 Login করুন → My Account → My Subscriptions\n\n"
+            f"⚠️ Login এ আপনার WhatsApp নম্বরে OTP আসবে।\n"
+            f"OTP দিয়ে verify করলেই subscription details দেখতে পাবেন।\n\n"
+            f"ধন্যবাদ Favourite Deals এ order করার জন্য! 🎉"
         )
+        # Admin কে summary
         await query.edit_message_text(
             f"🎉 *Order সফল!*\n\n"
             f"📦 {context.user_data['product_name']}\n"
             f"🎯 {var['name']} — ৳{var['price']}\n"
             f"👤 {name} | {phone}\n"
             f"📧 {email}\n\n"
-            f"⚡ Main bot থেকে subscription activate করো।\n\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"📋 *Client কে পাঠানোর Message:*\n"
-            f"━━━━━━━━━━━━━━━━\n\n"
-            f"{client_msg}",
+            f"⚡ Main bot থেকে subscription activate করো।",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛒 আরেকটা Order", callback_data="new_order")]])
+        )
+        # Client message আলাদা — copy করা সহজ
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=client_msg
         )
     else:
         await query.edit_message_text(
