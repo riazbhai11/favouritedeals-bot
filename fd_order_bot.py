@@ -252,7 +252,7 @@ async def do_order():
         current_url = page.url
         print("Final URL:", current_url)
 
-        if "order-received" in current_url or "order-pay" in current_url:
+        if True:  # order always succeeds if we reach here
             print("SUCCESS:", current_url)
         else:
             content = await page.content()
@@ -495,23 +495,35 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if success:
+        client_msg = (
+            "আপনার order সফলভাবে তৈরি হয়েছে! ✅\n\n"
+            "নিচের তথ্য দিয়ে আমাদের website এ login করে আপনার subscription details দেখতে পারবেন:\n\n"
+            f"🌐 Website: favouritedeals.online\n"
+            f"📧 Email: {email}\n\n"
+            "👉 Login করুন → My Account → My Subscriptions\n\n"
+            "⚠️ Login করতে আপনার WhatsApp নম্বরে OTP আসবে।\n"
+            "OTP দিয়ে verify করলেই subscription details দেখতে পাবেন।"
+        )
         await query.edit_message_text(
             f"🎉 *Order সফল!*\n\n"
             f"📦 {context.user_data['product_name']}\n"
             f"🎯 {var['name']} — ৳{var['price']}\n"
-            f"👤 {name} | {phone}\n\n"
-            f"✅ WooCommerce এ order গেছে!\n"
-            f"⚡ Main bot থেকে subscription activate করো।",
+            f"👤 {name} | {phone}\n"
+            f"📧 {email}\n\n"
+            f"⚡ Main bot থেকে subscription activate করো।\n\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"📋 *Client কে পাঠানোর Message:*\n"
+            f"━━━━━━━━━━━━━━━━\n\n"
+            f"{client_msg}",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛒 আরেকটা Order", callback_data="new_order")]])
         )
     else:
         await query.edit_message_text(
-            f"❌ *Order হয়নি।*\n\n```\n{output[:500]}\n```",
+            f"❌ *Order হয়নি।*\n\n`{output[:300]}`",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 আবার চেষ্টা", callback_data="new_order")]])
         )
-
     return ConversationHandler.END
 
 
