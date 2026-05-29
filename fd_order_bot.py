@@ -76,6 +76,7 @@ def wc_delete(endpoint):
 # ── Live Product Fetch ────────────────────────────────────────────────
 
 def fetch_live_products():
+    """WooCommerce থেকে সব in-stock products fetch করো"""
     try:
         products = wc_get("products", {
             "status": "publish",
@@ -91,11 +92,15 @@ def fetch_live_products():
         for p in products:
             if p.get("catalog_visibility") == "hidden":
                 continue
+            name  = p.get("name", "")
+            pid   = p.get("id")
+            ptype = p.get("type", "simple")
+            price = p.get("price", "0")
             result.append({
-                "pid":   p.get("id"),
-                "name":  p.get("name", ""),
-                "type":  p.get("type", "simple"),
-                "price": p.get("price", "0"),
+                "pid":   pid,
+                "name":  name,
+                "type":  ptype,
+                "price": price,
             })
         return result
     except Exception as e:
@@ -124,6 +129,7 @@ def fetch_variations(pid):
 # ── Dynamic Coupon ────────────────────────────────────────────────────
 
 def create_discount_coupon(original_price, custom_price):
+    """Discount amount এর একটা one-time coupon বানাও"""
     try:
         discount = float(original_price) - float(custom_price)
         if discount <= 0:
@@ -133,12 +139,12 @@ def create_discount_coupon(original_price, custom_price):
         code = "FD-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
         coupon = wc_post("coupons", {
-            "code":           code,
-            "discount_type":  "fixed_cart",
-            "amount":         str(round(discount, 2)),
-            "usage_limit":    1,
-            "individual_use": True,
-            "free_shipping":  False,
+            "code":               code,
+            "discount_type":      "fixed_cart",
+            "amount":             str(round(discount, 2)),
+            "usage_limit":        1,
+            "individual_use":     True,
+            "free_shipping":      False,
         })
 
         if coupon and coupon.get("id"):
@@ -190,7 +196,7 @@ def bot_get_autologin_url(token, redirect_url):
 
 # ── Playwright ────────────────────────────────────────────────────────
 
-def run_playwright_order(autologin_url, variation_id, product_id, client_name, client_phone, client_email, coupon_code=None):
+def run_playwright_order(autologin_url, variation_id, client_name, client_phone, client_email, coupon_code=None):
     coupon_js = ""
     if coupon_code:
         coupon_js = f"""
@@ -215,33 +221,20 @@ from playwright.async_api import async_playwright
 async def do_order():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-        page = await context.new_page()
+        page = await browser.new_page()
 
         print("Logging in...")
-        try:
-            await page.goto("{autologin_url}", timeout=60000, wait_until="domcontentloaded")
-            await asyncio.sleep(3)
-        except Exception as e:
-            print("Login goto error:", e)
+        await page.goto("{autologin_url}", timeout=30000)
+        await page.wait_for_load_state("networkidle")
         print("After login:", page.url)
 
         print("Adding to cart...")
-        try:
-            await page.goto("{WP_URL}/?add-to-cart={product_id}&variation_id={variation_id}&quantity=1", timeout=60000, wait_until="domcontentloaded")
-            await asyncio.sleep(2)
-        except Exception as e:
-            print("Cart goto error:", e)
-        print("After cart:", page.url)
+        await page.goto("{WP_URL}/?add-to-cart={variation_id}&quantity=1", timeout=30000)
+        await page.wait_for_load_state("networkidle")
 
         print("Going to checkout...")
-        try:
-            await page.goto("{WP_URL}/checkout/", timeout=60000, wait_until="domcontentloaded")
-            await asyncio.sleep(3)
-        except Exception as e:
-            print("Checkout goto error:", e)
+        await page.goto("{WP_URL}/checkout/", timeout=30000)
+        await page.wait_for_load_state("networkidle")
 
         {coupon_js}
 
@@ -269,7 +262,7 @@ async def do_order():
                 if await verify_btn.count() > 0:
                     await verify_btn.first.click()
                     print("Verify button clicked!")
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(2)
         except Exception as e:
             print("Verify email error:", e)
 
@@ -289,20 +282,13 @@ async def do_order():
         print("Placing order...")
         try:
             await page.click("#place_order", timeout=10000)
-            await asyncio.sleep(5)
-            try:
-                await page.wait_for_url("**/order-received/**", timeout=30000)
-            except:
-                pass
+            await page.wait_for_load_state("networkidle", timeout=30000)
         except Exception as e:
             print("Place order error:", e)
 
         current_url = page.url
         print("Final URL:", current_url)
-        if "order-received" in current_url:
-            print("SUCCESS: order placed!")
-        else:
-            print("FAILED: still on", current_url)
+        print("SUCCESS:", current_url)
 
         await browser.close()
 
@@ -312,14 +298,14 @@ asyncio.run(do_order())
     try:
         result = subprocess.run(
             ["python3", "-c", script],
-            capture_output=True, text=True, timeout=180
+            capture_output=True, text=True, timeout=120
         )
         output = result.stdout + result.stderr
         logger.info(f"Playwright: {output}")
-        success = "SUCCESS: order placed!" in output
+        success = "SUCCESS" in output
         return success, output
     except subprocess.TimeoutExpired:
-        return False, "Timeout — 3 মিনিটেও order হয়নি।"
+        return False, "Timeout — 2 মিনিটেও order হয়নি।"
     except Exception as e:
         return False, f"Error: {str(e)}"
 
@@ -521,8 +507,8 @@ async def discount_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "discount_no":
         var = context.user_data["selected_variation"]
-        context.user_data["final_price"] = var["price"]
-        context.user_data["coupon_code"] = None
+        context.user_data["final_price"]  = var["price"]
+        context.user_data["coupon_code"]  = None
         await query.edit_message_text(
             _order_summary(context),
             parse_mode="Markdown",
@@ -559,9 +545,9 @@ async def get_custom_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return STATE_CUSTOM_PRICE
 
     discount = original_price - custom_price
-    context.user_data["final_price"]     = custom_price
+    context.user_data["final_price"]    = custom_price
     context.user_data["discount_amount"] = discount
-    context.user_data["coupon_code"]     = None
+    context.user_data["coupon_code"]    = None  # checkout এ বানাবো
 
     await update.message.reply_text(
         f"✅ Custom Price: *৳{int(custom_price)}*\n"
@@ -574,12 +560,12 @@ async def get_custom_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _order_summary(context):
-    var         = context.user_data["selected_variation"]
-    product     = context.user_data["selected_product"]
-    name        = context.user_data["client_name"]
-    phone       = context.user_data["client_phone"]
-    email       = context.user_data["client_email"]
-    final_price = context.user_data.get("final_price", var["price"])
+    var          = context.user_data["selected_variation"]
+    product      = context.user_data["selected_product"]
+    name         = context.user_data["client_name"]
+    phone        = context.user_data["client_phone"]
+    email        = context.user_data["client_email"]
+    final_price  = context.user_data.get("final_price", var["price"])
 
     return (
         f"📋 *Order Summary:*\n\n"
@@ -626,20 +612,16 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     token = user_resp.get("token")
-    await query.edit_message_text(
-        "✅ User ready!\n\n🎟️ Coupon বানাচ্ছি..." if has_discount else "✅ User ready!\n\n🛒 Checkout শুরু হচ্ছে..."
-    )
+    await query.edit_message_text("✅ User ready!\n\n🎟️ Coupon বানাচ্ছি..." if has_discount else "✅ User ready!\n\n🛒 Checkout শুরু হচ্ছে...")
 
+    # Coupon বানাও যদি discount থাকে
     coupon_info = None
     coupon_code = None
     if has_discount:
         coupon_info = create_discount_coupon(var["price"], final_price)
         if coupon_info:
             coupon_code = coupon_info["code"]
-            await query.edit_message_text(
-                f"✅ Coupon ready: `{coupon_code}`\n\n🤖 Browser চালু হচ্ছে...",
-                parse_mode="Markdown"
-            )
+            await query.edit_message_text(f"✅ Coupon ready: `{coupon_code}`\n\n🤖 Browser চালু হচ্ছে...", parse_mode="Markdown")
         else:
             await query.edit_message_text("⚠️ Coupon বানানো যায়নি, original price এ order হবে।")
 
@@ -647,20 +629,18 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not autologin.get("success"):
         if coupon_info:
             delete_coupon(coupon_info["id"])
-        await query.edit_message_text("❌ Auto-login URL পাওয়া যায়নি.")
+        await query.edit_message_text(f"❌ Auto-login URL পাওয়া যায়নি.")
         return ConversationHandler.END
 
-    await query.edit_message_text(
-        "🤖 *Browser চালু হচ্ছে...*\n\n⏳ 2-3 মিনিট অপেক্ষা করো।",
-        parse_mode="Markdown"
-    )
+    await query.edit_message_text("🤖 *Browser চালু হচ্ছে...*\n\n⏳ 1-2 মিনিট অপেক্ষা করো।", parse_mode="Markdown")
 
     loop = asyncio.get_event_loop()
     success, output = await loop.run_in_executor(
         None, run_playwright_order,
-        autologin["autologin_url"], var["id"], product["pid"], name, phone, email, coupon_code
+        autologin["autologin_url"], var["id"], name, phone, email, coupon_code
     )
 
+    # Coupon delete করো (used হোক বা না হোক)
     if coupon_info:
         delete_coupon(coupon_info["id"])
 
@@ -678,9 +658,7 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"ধন্যবাদ Favourite Deals এ order করার জন্য! 🎉"
         )
 
-        price_text = f"৳{int(float(final_price))}" + (
-            f" (Discount: ৳{int(float(var['price']) - float(final_price))})" if has_discount else ""
-        )
+        price_text = f"৳{int(float(final_price))}" + (f" (Discount: ৳{int(float(var['price']) - float(final_price))})" if has_discount else "")
 
         await query.edit_message_text(
             f"🎉 *Order সফল!*\n\n"
@@ -694,7 +672,10 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛒 আরেকটা Order", callback_data="new_order")]])
         )
 
-        await context.bot.send_message(chat_id=query.message.chat_id, text=client_msg)
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=client_msg
+        )
     else:
         await query.edit_message_text(
             f"❌ *Order হয়নি।*\n\n`{output[:300]}`",
@@ -724,11 +705,11 @@ def main():
             CallbackQueryHandler(new_order_start, pattern="^new_order$"),
         ],
         states={
-            STATE_PRODUCT:      [
+            STATE_PRODUCT:   [
                 CallbackQueryHandler(product_selected, pattern="^prod_"),
                 CallbackQueryHandler(cancel, pattern="^cancel$"),
             ],
-            STATE_VARIATION:    [
+            STATE_VARIATION: [
                 CallbackQueryHandler(variation_selected, pattern="^(var_|back_product)"),
                 CallbackQueryHandler(cancel, pattern="^cancel$"),
             ],
