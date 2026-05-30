@@ -230,6 +230,11 @@ def run_playwright_order(autologin_url, variation_id, client_name, client_phone,
                 apply_btn = page.locator("button[name='apply_coupon']")
                 if await apply_btn.count() > 0:
                     await apply_btn.click()
+                    try:
+                        await page.wait_for_selector(".woocommerce-message, .woocommerce-error", timeout=8000)
+                    except:
+                        pass
+                    await page.wait_for_load_state("networkidle")
                     await asyncio.sleep(2)
                     print("Coupon applied!")
         except Exception as e:
