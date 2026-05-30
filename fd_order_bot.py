@@ -110,7 +110,7 @@ INITIAL_PRODUCTS = {
     },
 }
 
-STATE_PRODUCT, STATE_VARIATION, STATE_CLIENT_NAME, STATE_CLIENT_PHONE, STATE_CLIENT_EMAIL, STATE_CONFIRM, STATE_ADD_PRODUCT_NAME, STATE_ADD_PRODUCT_ID = range(8)
+STATE_PRODUCT, STATE_VARIATION, STATE_DISCOUNT, STATE_CUSTOM_PRICE, STATE_CLIENT_NAME, STATE_CLIENT_PHONE, STATE_CLIENT_EMAIL, STATE_CONFIRM, STATE_ADD_PRODUCT_NAME, STATE_ADD_PRODUCT_ID = range(10)
 
 
 def load_products():
@@ -147,6 +147,49 @@ def fetch_variations(pid):
         return []
 
 
+# ── Coupon helpers ──────────────────────────────────────────────────────────
+
+def wc_create_coupon(discount_amount: int, product_id: int) -> dict:
+    """WooCommerce API দিয়ে একটা single-use coupon বানাও।"""
+    import random, string
+    code = "FD" + "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    payload = {
+        "code": code,
+        "discount_type": "fixed_cart",
+        "amount": str(discount_amount),
+        "usage_limit": 1,
+        "product_ids": [product_id],
+    }
+    try:
+        resp = req.post(
+            f"{WP_URL}/wp-json/wc/v3/coupons",
+            auth=(WC_KEY, WC_SECRET),
+            json=payload,
+            timeout=15
+        ).json()
+        if resp.get("id"):
+            return {"success": True, "id": resp["id"], "code": resp["code"]}
+        return {"success": False, "message": str(resp)}
+    except Exception as e:
+        logger.error(f"wc_create_coupon: {e}")
+        return {"success": False, "message": str(e)}
+
+
+def wc_delete_coupon(coupon_id: int):
+    """Order complete হলে coupon delete করো।"""
+    try:
+        req.delete(
+            f"{WP_URL}/wp-json/wc/v3/coupons/{coupon_id}?force=true",
+            auth=(WC_KEY, WC_SECRET),
+            timeout=15
+        )
+        logger.info(f"Coupon {coupon_id} deleted.")
+    except Exception as e:
+        logger.error(f"wc_delete_coupon: {e}")
+
+
+# ── Playwright ──────────────────────────────────────────────────────────────
+
 def bot_create_user(name, email, phone):
     try:
         resp = req.post(
@@ -175,8 +218,25 @@ def bot_get_autologin_url(token, redirect_url):
         return {"success": False, "message": str(e)}
 
 
-def run_playwright_order(autologin_url, variation_id, client_name, client_phone, client_email):
-    script = """
+def run_playwright_order(autologin_url, variation_id, client_name, client_phone, client_email, coupon_code=None):
+    coupon_block = ""
+    if coupon_code:
+        coupon_block = f"""
+        print("Applying coupon...")
+        try:
+            coupon_input = page.locator("#coupon_code")
+            if await coupon_input.count() > 0:
+                await coupon_input.fill("{coupon_code}")
+                apply_btn = page.locator("button[name='apply_coupon']")
+                if await apply_btn.count() > 0:
+                    await apply_btn.click()
+                    await asyncio.sleep(2)
+                    print("Coupon applied!")
+        except Exception as e:
+            print("Coupon error:", e)
+"""
+
+    script = f"""
 import asyncio
 from playwright.async_api import async_playwright
 
@@ -186,29 +246,31 @@ async def do_order():
         page = await browser.new_page()
 
         print("Logging in...")
-        await page.goto("AUTOLOGIN_URL", timeout=30000)
+        await page.goto("{autologin_url}", timeout=30000)
         await page.wait_for_load_state("networkidle")
         print("After login:", page.url)
 
         print("Adding to cart...")
-        await page.goto("WP_URL/?add-to-cart=VARIATION_ID&quantity=1", timeout=30000)
+        await page.goto("{WP_URL}/?add-to-cart={variation_id}&quantity=1", timeout=30000)
         await page.wait_for_load_state("networkidle")
 
         print("Going to checkout...")
-        await page.goto("WP_URL/checkout/", timeout=30000)
+        await page.goto("{WP_URL}/checkout/", timeout=30000)
         await page.wait_for_load_state("networkidle")
+
+        {coupon_block}
 
         print("Filling billing info...")
         try:
-            await page.fill("#billing_first_name", "CLIENT_NAME")
+            await page.fill("#billing_first_name", "{client_name}")
         except:
             pass
         try:
-            await page.fill("#billing_phone", "CLIENT_PHONE")
+            await page.fill("#billing_phone", "{client_phone}")
         except:
             pass
         try:
-            await page.fill("#billing_email", "CLIENT_EMAIL")
+            await page.fill("#billing_email", "{client_email}")
         except:
             pass
 
@@ -218,7 +280,7 @@ async def do_order():
         try:
             verify = page.locator("#manual_verify_email")
             if await verify.count() > 0:
-                await verify.fill("VERIFY_EMAIL")
+                await verify.fill("{VERIFY_EMAIL}")
                 print("Verify email filled!")
                 await asyncio.sleep(1)
                 verify_btn = page.locator("button:has-text('VERIFY ACCESS')")
@@ -252,25 +314,13 @@ async def do_order():
         current_url = page.url
         print("Final URL:", current_url)
 
-        if True:  # order always succeeds if we reach here
+        if True:
             print("SUCCESS:", current_url)
-        else:
-            content = await page.content()
-            import re
-            order_match = re.search(r"order[_-]?(\d+)|#(\d+)", current_url)
-            if order_match:
-                print("ORDER_ID:", order_match.group(1) or order_match.group(2))
 
         await browser.close()
 
 asyncio.run(do_order())
-""".replace("AUTOLOGIN_URL", autologin_url)\
-   .replace("WP_URL", WP_URL)\
-   .replace("VARIATION_ID", str(variation_id))\
-   .replace("CLIENT_NAME", client_name)\
-   .replace("CLIENT_PHONE", client_phone)\
-   .replace("CLIENT_EMAIL", client_email)\
-   .replace("VERIFY_EMAIL", VERIFY_EMAIL)
+"""
 
     try:
         result = subprocess.run(
@@ -286,6 +336,8 @@ asyncio.run(do_order())
     except Exception as e:
         return False, f"Error: {str(e)}"
 
+
+# ── Keyboards ───────────────────────────────────────────────────────────────
 
 def product_keyboard():
     products = load_products()
@@ -310,6 +362,8 @@ def variation_keyboard(variations):
     keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_product")])
     return InlineKeyboardMarkup(keyboard)
 
+
+# ── Handlers ────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -360,11 +414,8 @@ async def product_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not variations:
         context.user_data["selected_variation"] = {"id": product_data["pid"], "name": product_name, "price": 0}
-        await query.edit_message_text(
-            f"📦 *{product_name}*\n\n👤 Client এর *নাম* দাও:",
-            parse_mode="Markdown"
-        )
-        return STATE_CLIENT_NAME
+        # No variation → directly ask discount
+        return await _ask_discount(query, context)
 
     await query.edit_message_text(
         f"📦 *{product_name}*\n\nPlan বেছে নাও:",
@@ -389,12 +440,92 @@ async def variation_selected(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("❌ Plan পাওয়া যায়নি।")
         return ConversationHandler.END
 
-    selected = variations[idx]
-    context.user_data["selected_variation"] = selected
+    context.user_data["selected_variation"] = variations[idx]
+    return await _ask_discount(query, context)
 
+
+async def _ask_discount(query, context: ContextTypes.DEFAULT_TYPE):
+    """Plan select এর পরে discount জিজ্ঞেস করো।"""
+    v = context.user_data["selected_variation"]
     await query.edit_message_text(
         f"✅ *{context.user_data['product_name']}*\n"
-        f"📋 Plan: {selected['name']} — ৳{selected['price']}\n\n"
+        f"📋 Plan: {v['name']} — ৳{v['price']}\n\n"
+        f"💸 এই order এ discount দেবে?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ হ্যাঁ", callback_data="discount_yes"),
+                InlineKeyboardButton("❌ না", callback_data="discount_no"),
+            ]
+        ])
+    )
+    return STATE_DISCOUNT
+
+
+async def handle_discount_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "discount_no":
+        context.user_data["coupon_code"] = None
+        context.user_data["coupon_id"] = None
+        context.user_data["final_price"] = context.user_data["selected_variation"]["price"]
+        await query.edit_message_text(
+            f"👤 Client এর *নাম* দাও:",
+            parse_mode="Markdown"
+        )
+        return STATE_CLIENT_NAME
+
+    # Discount হ্যাঁ
+    v = context.user_data["selected_variation"]
+    await query.edit_message_text(
+        f"💸 *Discount Price*\n\n"
+        f"Original price: ৳{v['price']}\n\n"
+        f"Client কত টাকায় কিনবে? (শুধু সংখ্যা লেখো)\n"
+        f"যেমন: `300`",
+        parse_mode="Markdown"
+    )
+    return STATE_CUSTOM_PRICE
+
+
+async def handle_custom_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        custom_price = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("❌ শুধু সংখ্যা লেখো। যেমন: 300")
+        return STATE_CUSTOM_PRICE
+
+    v = context.user_data["selected_variation"]
+    original_price = v["price"]
+
+    if custom_price <= 0:
+        await update.message.reply_text("❌ Price 0 বা কম হতে পারবে না।")
+        return STATE_CUSTOM_PRICE
+
+    if custom_price >= original_price:
+        await update.message.reply_text(
+            f"❌ Custom price (৳{custom_price}) অবশ্যই original price (৳{original_price}) এর কম হতে হবে।"
+        )
+        return STATE_CUSTOM_PRICE
+
+    discount_amount = original_price - custom_price
+    await update.message.reply_text(f"⏳ Coupon তৈরি হচ্ছে... (৳{discount_amount} off)")
+
+    product_id = context.user_data["product_data"]["pid"]
+    coupon_resp = wc_create_coupon(discount_amount, product_id)
+
+    if not coupon_resp.get("success"):
+        await update.message.reply_text(f"❌ Coupon তৈরি হয়নি:\n{coupon_resp.get('message', '')}")
+        return STATE_CUSTOM_PRICE
+
+    context.user_data["coupon_code"] = coupon_resp["code"]
+    context.user_data["coupon_id"] = coupon_resp["id"]
+    context.user_data["final_price"] = custom_price
+
+    await update.message.reply_text(
+        f"✅ Coupon তৈরি হয়েছে!\n"
+        f"🏷️ Code: `{coupon_resp['code']}`\n"
+        f"💰 ৳{original_price} → ৳{custom_price} (৳{discount_amount} off)\n\n"
         f"👤 Client এর *নাম* দাও:",
         parse_mode="Markdown"
     )
@@ -432,12 +563,17 @@ async def get_client_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["client_email"] = email
     v = context.user_data["selected_variation"]
+    final_price = context.user_data.get("final_price", v["price"])
+    coupon_code = context.user_data.get("coupon_code")
+
+    discount_line = f"🏷️ Discount: ৳{v['price']} → ৳{final_price}\n" if coupon_code else ""
 
     await update.message.reply_text(
         f"📋 *Order Summary:*\n\n"
         f"📦 {context.user_data['product_name']}\n"
         f"🎯 Plan: {v['name']}\n"
-        f"💵 দাম: ৳{v['price']}\n\n"
+        f"💵 দাম: ৳{final_price}\n"
+        f"{discount_line}\n"
         f"👤 নাম: {context.user_data['client_name']}\n"
         f"📱 Phone: {context.user_data['client_phone']}\n"
         f"📧 Email: {email}\n\n"
@@ -458,18 +594,27 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "confirm_no":
+        # Cancel হলে coupon delete করো
+        coupon_id = context.user_data.get("coupon_id")
+        if coupon_id:
+            wc_delete_coupon(coupon_id)
         await query.edit_message_text("❌ Order cancel করা হয়েছে।")
         return ConversationHandler.END
 
     await query.edit_message_text("⏳ User create করছি...", parse_mode="Markdown")
 
-    name  = context.user_data["client_name"]
-    phone = context.user_data["client_phone"]
-    email = context.user_data["client_email"]
-    var   = context.user_data["selected_variation"]
+    name        = context.user_data["client_name"]
+    phone       = context.user_data["client_phone"]
+    email       = context.user_data["client_email"]
+    var         = context.user_data["selected_variation"]
+    final_price = context.user_data.get("final_price", var["price"])
+    coupon_code = context.user_data.get("coupon_code")
+    coupon_id   = context.user_data.get("coupon_id")
 
     user_resp = bot_create_user(name, email, phone)
     if not user_resp.get("success"):
+        if coupon_id:
+            wc_delete_coupon(coupon_id)
         await query.edit_message_text(f"❌ User create হয়নি:\n{user_resp.get('message','')}")
         return ConversationHandler.END
 
@@ -483,6 +628,8 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     autologin = bot_get_autologin_url(token, f"{WP_URL}/checkout/")
     if not autologin.get("success"):
+        if coupon_id:
+            wc_delete_coupon(coupon_id)
         await query.edit_message_text(f"❌ Auto-login URL পাওয়া যায়নি:\n{autologin.get('message','')}")
         return ConversationHandler.END
 
@@ -491,10 +638,15 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loop = asyncio.get_event_loop()
     success, output = await loop.run_in_executor(
         None, run_playwright_order,
-        autologin["autologin_url"], var["id"], name, phone, email
+        autologin["autologin_url"], var["id"], name, phone, email, coupon_code
     )
 
     if success:
+        # Order সফল → coupon delete
+        if coupon_id:
+            wc_delete_coupon(coupon_id)
+
+        discount_line = f"🏷️ Discount price: ৳{final_price}\n" if coupon_code else ""
         client_msg = (
             f"আসসালামুয়ালাইকুম! 👋\n\n"
             f"আপনার order সফলভাবে তৈরি হয়েছে! ✅\n\n"
@@ -507,23 +659,22 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"OTP দিয়ে verify করলেই subscription details দেখতে পাবেন।\n\n"
             f"ধন্যবাদ Favourite Deals এ order করার জন্য! 🎉"
         )
-        # Admin কে summary
         await query.edit_message_text(
             f"🎉 *Order সফল!*\n\n"
             f"📦 {context.user_data['product_name']}\n"
-            f"🎯 {var['name']} — ৳{var['price']}\n"
+            f"🎯 {var['name']} — ৳{final_price}\n"
+            f"{discount_line}"
             f"👤 {name} | {phone}\n"
             f"📧 {email}\n\n"
             f"⚡ Main bot থেকে subscription activate করো।",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛒 আরেকটা Order", callback_data="new_order")]])
         )
-        # Client message আলাদা — copy করা সহজ
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=client_msg
-        )
+        await context.bot.send_message(chat_id=query.message.chat_id, text=client_msg)
     else:
+        # Order fail → coupon delete (waste হবে না)
+        if coupon_id:
+            wc_delete_coupon(coupon_id)
         await query.edit_message_text(
             f"❌ *Order হয়নি।*\n\n`{output[:300]}`",
             parse_mode="Markdown",
@@ -587,6 +738,10 @@ async def add_product_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Cancel হলেও pending coupon delete করো
+    coupon_id = context.user_data.get("coupon_id") if hasattr(context, "user_data") else None
+    if coupon_id:
+        wc_delete_coupon(coupon_id)
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text("❌ Cancel করা হয়েছে।")
@@ -606,6 +761,8 @@ def main():
         states={
             STATE_PRODUCT:   [CallbackQueryHandler(product_selected, pattern="^prod_"), CallbackQueryHandler(cancel, pattern="^cancel$")],
             STATE_VARIATION: [CallbackQueryHandler(variation_selected, pattern="^(var_|back_product)"), CallbackQueryHandler(cancel, pattern="^cancel$")],
+            STATE_DISCOUNT:  [CallbackQueryHandler(handle_discount_choice, pattern="^discount_")],
+            STATE_CUSTOM_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_price)],
             STATE_CLIENT_NAME:  [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_name)],
             STATE_CLIENT_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_phone)],
             STATE_CLIENT_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_email)],
