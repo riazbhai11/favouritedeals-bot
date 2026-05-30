@@ -224,19 +224,30 @@ def run_playwright_order(autologin_url, variation_id, client_name, client_phone,
         coupon_block = f"""
         print("Applying coupon...")
         try:
-            coupon_input = page.locator("#coupon_code")
-            if await coupon_input.count() > 0:
-                await coupon_input.fill("{coupon_code}")
+            toggle = page.get_by_text("Click here to enter your code")
+            if await toggle.count() > 0:
+                await toggle.first.click()
+                await asyncio.sleep(1.5)
+                print("Coupon toggle clicked!")
+
+            await page.wait_for_selector("#coupon_code", state="visible", timeout=10000)
+            await page.fill("#coupon_code", "{coupon_code}")
+            await asyncio.sleep(0.5)
+            print("Coupon code filled!")
+
+            apply_btn = page.get_by_role("button", name="APPLY COUPON")
+            if await apply_btn.count() == 0:
                 apply_btn = page.locator("button[name='apply_coupon']")
-                if await apply_btn.count() > 0:
-                    await apply_btn.click()
-                    try:
-                        await page.wait_for_selector(".woocommerce-message, .woocommerce-error", timeout=8000)
-                    except:
-                        pass
-                    await page.wait_for_load_state("networkidle")
-                    await asyncio.sleep(2)
-                    print("Coupon applied!")
+            await apply_btn.first.click()
+            print("Apply button clicked!")
+
+            try:
+                await page.wait_for_selector(".woocommerce-message, .woocommerce-error", timeout=8000)
+            except:
+                pass
+            await page.wait_for_load_state("networkidle")
+            await asyncio.sleep(2)
+            print("Coupon applied!")
         except Exception as e:
             print("Coupon error:", e)
 """
