@@ -439,6 +439,15 @@ confirm_markup = InlineKeyboardMarkup([
 ])
 
 
+def _confirm_with_discount_markup():
+    """Confirm screen এ discount option সহ।"""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Order করো", callback_data="confirm_yes")],
+        [InlineKeyboardButton("💸 Discount যোগ করো", callback_data="confirm_add_discount")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="confirm_no")],
+    ])
+
+
 # ── Handlers ───────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -619,7 +628,16 @@ async def handle_discount_choice(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["client_name"]  = context.user_data["lookup_name"]
         context.user_data["client_email"] = context.user_data["lookup_email"]
         context.user_data["client_phone"] = context.user_data["lookup_phone"]
-        return await _ask_discount(query, context)
+        context.user_data["coupon_code"]  = None
+        context.user_data["coupon_id"]    = None
+        context.user_data["final_price"]  = context.user_data["selected_variation"]["price"]
+        # সরাসরি confirm দেখাও — discount option confirm screen এ থাকবে
+        await query.edit_message_text(
+            _build_confirm_text(context),
+            parse_mode="Markdown",
+            reply_markup=_confirm_with_discount_markup()
+        )
+        return STATE_CONFIRM
 
     if query.data == "lookup_no":
         await query.edit_message_text("👤 Client এর *নাম* দাও:", parse_mode="Markdown")
@@ -775,6 +793,12 @@ async def get_client_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
+    if query.data == "confirm_add_discount":
+        v = context.user_data["selected_variation"]
+        txt = "\U0001f4b8 *Discount Price*\n\nOriginal price: \u09f3" + str(v["price"]) + "\n\nClient \u0995\u09a4 \u099f\u09be\u0995\u09be\u09af\u09bc \u0995\u09bf\u09a8\u09ac\u09c7? (\u09b6\u09c1\u09a7\u09c1 \u09b8\u0982\u0996\u09cd\u09af\u09be)\n\u09af\u09c7\u09ae\u09a8: `300`"
+        await query.edit_message_text(txt, parse_mode="Markdown")
+        return STATE_CUSTOM_PRICE
 
     if query.data == "confirm_no":
         coupon_id = context.user_data.get("coupon_id")
@@ -950,7 +974,10 @@ def main():
             STATE_CLIENT_NAME:  [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_name)],
             STATE_CLIENT_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_phone)],
             STATE_CLIENT_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_email)],
-            STATE_CONFIRM:      [CallbackQueryHandler(confirm_order, pattern="^confirm_")],
+            STATE_CONFIRM:      [
+                CallbackQueryHandler(confirm_order, pattern="^confirm_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_price),
+            ],
             STATE_ADD_PRODUCT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_product_name)],
             STATE_ADD_PRODUCT_ID:   [MessageHandler(filters.TEXT & ~filters.COMMAND, add_product_id)],
         },
