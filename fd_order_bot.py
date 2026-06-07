@@ -110,21 +110,38 @@ def fetch_variations(pid):
 # ── WC helpers ─────────────────────────────────────────────────────────────
 
 def wc_lookup_by_phone(phone):
+    """Orders API দিয়ে billing phone search করো (Customers API phone support করে না)।"""
     import re
     digits = re.sub(r"[^0-9]", "", phone)
-    term   = digits[-10:] if len(digits) >= 10 else digits
+    term = digits[-11:] if len(digits) >= 11 else digits
     try:
-        resp = req.get(WP_URL + "/wp-json/wc/v3/customers",
+        # Method 1: Orders API — billing phone searchable
+        resp = req.get(WP_URL + "/wp-json/wc/v3/orders",
                        auth=(WC_KEY, WC_SECRET),
-                       params={"search": term, "per_page": 5},
+                       params={"search": term, "per_page": 1,
+                               "orderby": "date", "order": "desc"},
                        timeout=15).json()
         if isinstance(resp, list) and resp:
-            c    = resp[0]
-            name = (c.get("first_name","") + " " + c.get("last_name","")).strip()
+            billing = resp[0].get("billing", {})
+            name = (billing.get("first_name", "") + " " + billing.get("last_name", "")).strip()
+            if name or billing.get("email"):
+                return {"found": True,
+                        "name": name or "N/A",
+                        "email": billing.get("email", ""),
+                        "phone": billing.get("phone", "") or phone}
+
+        # Method 2: Customers API fallback (email/name match)
+        resp2 = req.get(WP_URL + "/wp-json/wc/v3/customers",
+                        auth=(WC_KEY, WC_SECRET),
+                        params={"search": term, "per_page": 5},
+                        timeout=15).json()
+        if isinstance(resp2, list) and resp2:
+            c = resp2[0]
+            name = (c.get("first_name", "") + " " + c.get("last_name", "")).strip()
             return {"found": True,
-                    "name":  name or "N/A",
-                    "email": c.get("email",""),
-                    "phone": c.get("billing",{}).get("phone","") or phone}
+                    "name": name or "N/A",
+                    "email": c.get("email", ""),
+                    "phone": c.get("billing", {}).get("phone", "") or phone}
     except Exception as e:
         logger.error("wc_lookup: " + str(e))
     return {"found": False}
