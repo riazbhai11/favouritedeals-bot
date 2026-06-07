@@ -255,7 +255,7 @@ def run_playwright_order(autologin_url, variation_id, client_name, client_phone,
         "        print('Placing order...')\n"
         "        try:\n"
         "            await page.click('#place_order', timeout=10000)\n"
-        "            await page.wait_for_load_state('networkidle', timeout=30000)\n"
+        "            await page.wait_for_url('**/order-received/**', timeout=60000)\n"
         "        except Exception as e: print('Place order error:', e)\n"
         "        final_url = page.url\n"
         "        print('Final URL:', final_url)\n"
