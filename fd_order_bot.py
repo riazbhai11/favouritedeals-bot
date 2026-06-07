@@ -110,25 +110,22 @@ def fetch_variations(pid):
 # ── WC helpers ─────────────────────────────────────────────────────────────
 
 def wc_lookup_by_email(email):
-    """WC Customers API দিয়ে email search।"""
+    """Orders API দিয়ে email search — billing email সবসময় কাজ করে।"""
     try:
-        # search parameter দিয়ে খোঁজো — email, name, username সব search করে
-        resp = req.get(WP_URL + "/wp-json/wc/v3/customers",
+        resp = req.get(WP_URL + "/wp-json/wc/v3/orders",
                        auth=(WC_KEY, WC_SECRET),
-                       params={"search": email, "per_page": 5},
+                       params={"search": email, "per_page": 1,
+                               "orderby": "date", "order": "desc",
+                               "status": "any"},
                        timeout=15).json()
         if isinstance(resp, list) and resp:
-            # exact email match খোঁজো
-            for c in resp:
-                if c.get("email", "").lower() == email.lower():
-                    name = (c.get("first_name", "") + " " + c.get("last_name", "")).strip()
-                    phone = c.get("billing", {}).get("phone", "")
-                    return {"found": True, "name": name or "N/A", "email": c.get("email", email), "phone": phone}
-            # exact match না পেলে প্রথমটা নাও
-            c = resp[0]
-            name = (c.get("first_name", "") + " " + c.get("last_name", "")).strip()
-            phone = c.get("billing", {}).get("phone", "")
-            return {"found": True, "name": name or "N/A", "email": c.get("email", email), "phone": phone}
+            b = resp[0].get("billing", {})
+            name = (b.get("first_name", "") + " " + b.get("last_name", "")).strip()
+            phone = b.get("phone", "")
+            found_email = b.get("email", "")
+            if found_email.lower() == email.lower():
+                return {"found": True, "name": name or "N/A",
+                        "email": found_email, "phone": phone}
     except Exception as e:
         logger.error("wc_lookup_by_email: " + str(e))
     return {"found": False}
