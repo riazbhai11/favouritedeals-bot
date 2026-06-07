@@ -388,6 +388,53 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🛒 নতুন Order", callback_data="new_order")],
             [InlineKeyboardButton("➕ Product Add", callback_data="add_product")],
+            [InlineKeyboardButton("🔄 Price Refresh", callback_data="refresh_prices")],
+        ])
+    )
+
+
+async def refresh_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("⏳ সব product এর latest price fetch করছি...")
+
+    products = load_products()
+    updated = 0
+    failed = 0
+
+    for name, data in products.items():
+        pid = data.get("pid")
+        if not pid:
+            continue
+        try:
+            variations = fetch_variations(pid)
+            if variations:
+                products[name]["variations"] = variations
+                updated += 1
+            else:
+                # Simple product — direct price fetch
+                resp = req.get(
+                    f"{WP_URL}/wp-json/wc/v3/products/{pid}",
+                    auth=(WC_KEY, WC_SECRET), timeout=15
+                ).json()
+                price = int(float(resp.get("price", 0)))
+                if price:
+                    products[name]["price"] = price
+                updated += 1
+        except Exception as e:
+            logger.error(f"refresh {name}: {e}")
+            failed += 1
+
+    save_products(products)
+
+    await query.edit_message_text(
+        f"✅ *Price Refresh সম্পন্ন!*\n\n"
+        f"📦 Updated: {updated} products\n"
+        f"❌ Failed: {failed} products",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🛒 Order করো", callback_data="new_order")],
+            [InlineKeyboardButton("🔄 আবার Refresh", callback_data="refresh_prices")],
         ])
     )
 
@@ -773,6 +820,7 @@ def main():
         entry_points=[
             CallbackQueryHandler(new_order_start, pattern="^new_order$"),
             CallbackQueryHandler(add_product_start, pattern="^add_product$"),
+            CallbackQueryHandler(refresh_prices, pattern="^refresh_prices$"),
         ],
         states={
             STATE_PRODUCT:   [CallbackQueryHandler(product_selected, pattern="^prod_"), CallbackQueryHandler(cancel, pattern="^cancel$")],
@@ -792,6 +840,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv)
+    app.add_handler(CallbackQueryHandler(refresh_prices, pattern="^refresh_prices$"))
 
     logger.info("FD Order Bot started!")
     app.run_polling()
