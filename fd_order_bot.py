@@ -110,7 +110,10 @@ INITIAL_PRODUCTS = {
     },
 }
 
-STATE_PRODUCT, STATE_VARIATION, STATE_DISCOUNT, STATE_CUSTOM_PRICE, STATE_CLIENT_NAME, STATE_CLIENT_PHONE, STATE_CLIENT_EMAIL, STATE_CONFIRM, STATE_ADD_PRODUCT_NAME, STATE_ADD_PRODUCT_ID = range(10)
+(STATE_PRODUCT, STATE_VARIATION, STATE_PHONE_LOOKUP, STATE_DISCOUNT,
+ STATE_CUSTOM_PRICE, STATE_CLIENT_NAME, STATE_CLIENT_PHONE,
+ STATE_CLIENT_EMAIL, STATE_CONFIRM,
+ STATE_ADD_PRODUCT_NAME, STATE_ADD_PRODUCT_ID) = range(11)
 
 
 def load_products():
@@ -147,10 +150,40 @@ def fetch_variations(pid):
         return []
 
 
-# ── Coupon helpers ──────────────────────────────────────────────────────────
+# ── WC Customer Lookup ─────────────────────────────────────────────────────
+
+def wc_lookup_by_phone(phone: str) -> dict:
+    import re
+    digits = re.sub(r"[^0-9]", "", phone)
+    search_term = digits[-10:] if len(digits) >= 10 else digits
+    try:
+        resp = req.get(
+            f"{WP_URL}/wp-json/wc/v3/customers",
+            auth=(WC_KEY, WC_SECRET),
+            params={"search": search_term, "per_page": 5},
+            timeout=15
+        ).json()
+        if isinstance(resp, list) and len(resp) > 0:
+            customer = resp[0]
+            name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
+            email = customer.get("email", "")
+            billing_phone = customer.get("billing", {}).get("phone", "")
+            return {
+                "found": True,
+                "id": customer.get("id"),
+                "name": name or "নাম নেই",
+                "email": email,
+                "phone": billing_phone or phone,
+            }
+        return {"found": False}
+    except Exception as e:
+        logger.error(f"wc_lookup_by_phone: {e}")
+        return {"found": False}
+
+
+# ── Coupon helpers ─────────────────────────────────────────────────────────
 
 def wc_create_coupon(discount_amount: int, product_id: int) -> dict:
-    """WooCommerce API দিয়ে একটা single-use coupon বানাও।"""
     import random, string
     code = "FD" + "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
     payload = {
@@ -176,7 +209,6 @@ def wc_create_coupon(discount_amount: int, product_id: int) -> dict:
 
 
 def wc_delete_coupon(coupon_id: int):
-    """Order complete হলে coupon delete করো।"""
     try:
         req.delete(
             f"{WP_URL}/wp-json/wc/v3/coupons/{coupon_id}?force=true",
@@ -188,7 +220,7 @@ def wc_delete_coupon(coupon_id: int):
         logger.error(f"wc_delete_coupon: {e}")
 
 
-# ── Playwright ──────────────────────────────────────────────────────────────
+# ── Playwright ─────────────────────────────────────────────────────────────
 
 def bot_create_user(name, email, phone):
     try:
@@ -353,7 +385,7 @@ asyncio.run(do_order())
         return False, f"Error: {str(e)}"
 
 
-# ── Keyboards ───────────────────────────────────────────────────────────────
+# ── Keyboards ──────────────────────────────────────────────────────────────
 
 def product_keyboard():
     products = load_products()
@@ -379,7 +411,35 @@ def variation_keyboard(variations):
     return InlineKeyboardMarkup(keyboard)
 
 
-# ── Handlers ────────────────────────────────────────────────────────────────
+# ── Confirm helpers ────────────────────────────────────────────────────────
+
+def _build_confirm_text(context):
+    v = context.user_data["selected_variation"]
+    final_price = context.user_data.get("final_price", v["price"])
+    coupon_code = context.user_data.get("coupon_code")
+    discount_line = f"🏷️ Discount: ৳{v['price']} → ৳{final_price}\n" if coupon_code else ""
+    return (
+        f"📋 *Order Summary:*\n\n"
+        f"📦 {context.user_data['product_name']}\n"
+        f"🎯 Plan: {v['name']}\n"
+        f"💵 দাম: ৳{final_price}\n"
+        f"{discount_line}\n"
+        f"👤 নাম: {context.user_data['client_name']}\n"
+        f"📱 Phone: {context.user_data['client_phone']}\n"
+        f"📧 Email: {context.user_data['client_email']}\n\n"
+        f"Order করবো?"
+    )
+
+
+confirm_markup = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton("✅ হ্যাঁ Order করো", callback_data="confirm_yes"),
+        InlineKeyboardButton("❌ Cancel", callback_data="confirm_no"),
+    ]
+])
+
+
+# ── Handlers ───────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -410,17 +470,7 @@ async def refresh_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
             variations = fetch_variations(pid)
             if variations:
                 products[name]["variations"] = variations
-                updated += 1
-            else:
-                # Simple product — direct price fetch
-                resp = req.get(
-                    f"{WP_URL}/wp-json/wc/v3/products/{pid}",
-                    auth=(WC_KEY, WC_SECRET), timeout=15
-                ).json()
-                price = int(float(resp.get("price", 0)))
-                if price:
-                    products[name]["price"] = price
-                updated += 1
+            updated += 1
         except Exception as e:
             logger.error(f"refresh {name}: {e}")
             failed += 1
@@ -477,8 +527,7 @@ async def product_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not variations:
         context.user_data["selected_variation"] = {"id": product_data["pid"], "name": product_name, "price": 0}
-        # No variation → directly ask discount
-        return await _ask_discount(query, context)
+        return await _ask_phone(query, context)
 
     await query.edit_message_text(
         f"📦 *{product_name}*\n\nPlan বেছে নাও:",
@@ -504,11 +553,108 @@ async def variation_selected(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
 
     context.user_data["selected_variation"] = variations[idx]
-    return await _ask_discount(query, context)
+    return await _ask_phone(query, context)
 
 
-async def _ask_discount(query, context: ContextTypes.DEFAULT_TYPE):
-    """Plan select এর পরে discount জিজ্ঞেস করো।"""
+async def _ask_phone(query, context):
+    """Plan select এর পরে phone দিতে বলো।"""
+    v = context.user_data["selected_variation"]
+    await query.edit_message_text(
+        f"✅ *{context.user_data['product_name']}*\n"
+        f"📋 Plan: {v['name']} — ৳{v['price']}\n\n"
+        f"📱 Client এর *WhatsApp নম্বর* দাও:\n"
+        f"(আগের account check করা হবে)",
+        parse_mode="Markdown"
+    )
+    return STATE_PHONE_LOOKUP
+
+
+async def handle_phone_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Phone নিয়ে WC তে check করো।"""
+    import re
+    phone = update.message.text.strip()
+    digits = re.sub(r"[^0-9]", "", phone)
+    if len(digits) < 10:
+        await update.message.reply_text("❌ সঠিক নম্বর দাও।")
+        return STATE_PHONE_LOOKUP
+
+    context.user_data["client_phone"] = phone
+    await update.message.reply_text("🔍 Account check করছি...")
+
+    result = wc_lookup_by_phone(phone)
+
+    if result["found"]:
+        context.user_data["lookup_name"]  = result["name"]
+        context.user_data["lookup_email"] = result["email"]
+        context.user_data["lookup_phone"] = result["phone"] or phone
+        await update.message.reply_text(
+            f"✅ *Account পাওয়া গেছে!*\n\n"
+            f"👤 নাম: {result['name']}\n"
+            f"📧 Email: {result['email']}\n"
+            f"📱 Phone: {result['phone'] or phone}\n\n"
+            f"এই client এর জন্য order করবো?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ হ্যাঁ এই client", callback_data="lookup_yes"),
+                    InlineKeyboardButton("❌ না, নতুন info", callback_data="lookup_no"),
+                ]
+            ])
+        )
+        return STATE_DISCOUNT
+    else:
+        await update.message.reply_text(
+            "ℹ️ এই নম্বরে account নেই।\n\n👤 Client এর *নাম* দাও:",
+            parse_mode="Markdown"
+        )
+        return STATE_CLIENT_NAME
+
+
+async def handle_discount_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    # Lookup confirm/reject
+    if query.data == "lookup_yes":
+        context.user_data["client_name"]  = context.user_data["lookup_name"]
+        context.user_data["client_email"] = context.user_data["lookup_email"]
+        context.user_data["client_phone"] = context.user_data["lookup_phone"]
+        return await _ask_discount(query, context)
+
+    if query.data == "lookup_no":
+        await query.edit_message_text("👤 Client এর *নাম* দাও:", parse_mode="Markdown")
+        return STATE_CLIENT_NAME
+
+    # Discount yes/no
+    if query.data == "discount_no":
+        context.user_data["coupon_code"] = None
+        context.user_data["coupon_id"]   = None
+        context.user_data["final_price"] = context.user_data["selected_variation"]["price"]
+        # সব data থাকলে সরাসরি confirm
+        if context.user_data.get("client_name") and context.user_data.get("client_email"):
+            await query.edit_message_text(
+                _build_confirm_text(context),
+                parse_mode="Markdown",
+                reply_markup=confirm_markup
+            )
+            return STATE_CONFIRM
+        await query.edit_message_text("👤 Client এর *নাম* দাও:", parse_mode="Markdown")
+        return STATE_CLIENT_NAME
+
+    if query.data == "discount_yes":
+        v = context.user_data["selected_variation"]
+        await query.edit_message_text(
+            f"💸 *Discount Price*\n\n"
+            f"Original price: ৳{v['price']}\n\n"
+            f"Client কত টাকায় কিনবে?\n"
+            f"যেমন: `300`",
+            parse_mode="Markdown"
+        )
+        return STATE_CUSTOM_PRICE
+
+
+async def _ask_discount(query, context):
+    """Discount জিজ্ঞেস করো।"""
     v = context.user_data["selected_variation"]
     await query.edit_message_text(
         f"✅ *{context.user_data['product_name']}*\n"
@@ -523,32 +669,6 @@ async def _ask_discount(query, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
     return STATE_DISCOUNT
-
-
-async def handle_discount_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "discount_no":
-        context.user_data["coupon_code"] = None
-        context.user_data["coupon_id"] = None
-        context.user_data["final_price"] = context.user_data["selected_variation"]["price"]
-        await query.edit_message_text(
-            f"👤 Client এর *নাম* দাও:",
-            parse_mode="Markdown"
-        )
-        return STATE_CLIENT_NAME
-
-    # Discount হ্যাঁ
-    v = context.user_data["selected_variation"]
-    await query.edit_message_text(
-        f"💸 *Discount Price*\n\n"
-        f"Original price: ৳{v['price']}\n\n"
-        f"Client কত টাকায় কিনবে? (শুধু সংখ্যা লেখো)\n"
-        f"যেমন: `300`",
-        parse_mode="Markdown"
-    )
-    return STATE_CUSTOM_PRICE
 
 
 async def handle_custom_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -582,8 +702,20 @@ async def handle_custom_price(update: Update, context: ContextTypes.DEFAULT_TYPE
         return STATE_CUSTOM_PRICE
 
     context.user_data["coupon_code"] = coupon_resp["code"]
-    context.user_data["coupon_id"] = coupon_resp["id"]
+    context.user_data["coupon_id"]   = coupon_resp["id"]
     context.user_data["final_price"] = custom_price
+
+    # সব data থাকলে সরাসরি confirm
+    if context.user_data.get("client_name") and context.user_data.get("client_email"):
+        await update.message.reply_text(
+            f"✅ Coupon তৈরি হয়েছে! 🏷️ ৳{original_price} → ৳{custom_price}"
+        )
+        await update.message.reply_text(
+            _build_confirm_text(context),
+            parse_mode="Markdown",
+            reply_markup=confirm_markup
+        )
+        return STATE_CONFIRM
 
     await update.message.reply_text(
         f"✅ Coupon তৈরি হয়েছে!\n"
@@ -601,8 +733,11 @@ async def get_client_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ সঠিক নাম দাও।")
         return STATE_CLIENT_NAME
     context.user_data["client_name"] = name
-    await update.message.reply_text(f"✅ নাম: *{name}*\n\n📱 Client এর *WhatsApp নম্বর* দাও:", parse_mode="Markdown")
-    return STATE_CLIENT_PHONE
+    await update.message.reply_text(
+        f"✅ নাম: *{name}*\n\n📧 Client এর *Email* দাও:",
+        parse_mode="Markdown"
+    )
+    return STATE_CLIENT_EMAIL
 
 
 async def get_client_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -613,7 +748,10 @@ async def get_client_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ সঠিক নম্বর দাও।")
         return STATE_CLIENT_PHONE
     context.user_data["client_phone"] = phone
-    await update.message.reply_text(f"✅ Phone: *{phone}*\n\n📧 Client এর *Email* দাও:", parse_mode="Markdown")
+    await update.message.reply_text(
+        f"✅ Phone: *{phone}*\n\n📧 Client এর *Email* দাও:",
+        parse_mode="Markdown"
+    )
     return STATE_CLIENT_EMAIL
 
 
@@ -625,29 +763,11 @@ async def get_client_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return STATE_CLIENT_EMAIL
 
     context.user_data["client_email"] = email
-    v = context.user_data["selected_variation"]
-    final_price = context.user_data.get("final_price", v["price"])
-    coupon_code = context.user_data.get("coupon_code")
-
-    discount_line = f"🏷️ Discount: ৳{v['price']} → ৳{final_price}\n" if coupon_code else ""
 
     await update.message.reply_text(
-        f"📋 *Order Summary:*\n\n"
-        f"📦 {context.user_data['product_name']}\n"
-        f"🎯 Plan: {v['name']}\n"
-        f"💵 দাম: ৳{final_price}\n"
-        f"{discount_line}\n"
-        f"👤 নাম: {context.user_data['client_name']}\n"
-        f"📱 Phone: {context.user_data['client_phone']}\n"
-        f"📧 Email: {email}\n\n"
-        f"Order করবো?",
+        _build_confirm_text(context),
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ হ্যাঁ Order করো", callback_data="confirm_yes"),
-                InlineKeyboardButton("❌ Cancel", callback_data="confirm_no"),
-            ]
-        ])
+        reply_markup=confirm_markup
     )
     return STATE_CONFIRM
 
@@ -657,7 +777,6 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "confirm_no":
-        # Cancel হলে coupon delete করো
         coupon_id = context.user_data.get("coupon_id")
         if coupon_id:
             wc_delete_coupon(coupon_id)
@@ -696,7 +815,10 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"❌ Auto-login URL পাওয়া যায়নি:\n{autologin.get('message','')}")
         return ConversationHandler.END
 
-    await query.edit_message_text("🤖 *Browser চালু হচ্ছে...*\n\n⏳ 1-2 মিনিট অপেক্ষা করো।", parse_mode="Markdown")
+    await query.edit_message_text(
+        "🤖 *Browser চালু হচ্ছে...*\n\n⏳ 1-2 মিনিট অপেক্ষা করো.",
+        parse_mode="Markdown"
+    )
 
     loop = asyncio.get_event_loop()
     success, output = await loop.run_in_executor(
@@ -705,7 +827,6 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if success:
-        # Order সফল → coupon delete
         if coupon_id:
             wc_delete_coupon(coupon_id)
 
@@ -735,7 +856,6 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await context.bot.send_message(chat_id=query.message.chat_id, text=client_msg)
     else:
-        # Order fail → coupon delete (waste হবে না)
         if coupon_id:
             wc_delete_coupon(coupon_id)
         await query.edit_message_text(
@@ -801,8 +921,7 @@ async def add_product_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Cancel হলেও pending coupon delete করো
-    coupon_id = context.user_data.get("coupon_id") if hasattr(context, "user_data") else None
+    coupon_id = context.user_data.get("coupon_id") if context.user_data else None
     if coupon_id:
         wc_delete_coupon(coupon_id)
     if update.callback_query:
@@ -823,9 +942,10 @@ def main():
             CallbackQueryHandler(refresh_prices, pattern="^refresh_prices$"),
         ],
         states={
-            STATE_PRODUCT:   [CallbackQueryHandler(product_selected, pattern="^prod_"), CallbackQueryHandler(cancel, pattern="^cancel$")],
-            STATE_VARIATION: [CallbackQueryHandler(variation_selected, pattern="^(var_|back_product)"), CallbackQueryHandler(cancel, pattern="^cancel$")],
-            STATE_DISCOUNT:  [CallbackQueryHandler(handle_discount_choice, pattern="^discount_")],
+            STATE_PRODUCT:      [CallbackQueryHandler(product_selected, pattern="^prod_"), CallbackQueryHandler(cancel, pattern="^cancel$")],
+            STATE_VARIATION:    [CallbackQueryHandler(variation_selected, pattern="^(var_|back_product)"), CallbackQueryHandler(cancel, pattern="^cancel$")],
+            STATE_PHONE_LOOKUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone_lookup)],
+            STATE_DISCOUNT:     [CallbackQueryHandler(handle_discount_choice, pattern="^(lookup_yes|lookup_no|discount_yes|discount_no)$")],
             STATE_CUSTOM_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_price)],
             STATE_CLIENT_NAME:  [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_name)],
             STATE_CLIENT_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_phone)],
