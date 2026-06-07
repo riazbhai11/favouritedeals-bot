@@ -73,10 +73,10 @@ INITIAL_PRODUCTS = {
     "🪟 Windows 10 Pro":        {"pid": 23961, "variations": []},
 }
 
-(STATE_PRODUCT, STATE_VARIATION, STATE_PHONE_LOOKUP,
+(STATE_PRODUCT, STATE_VARIATION, STATE_EMAIL_LOOKUP,
  STATE_CONFIRM, STATE_CUSTOM_PRICE,
- STATE_CLIENT_NAME, STATE_CLIENT_EMAIL,
- STATE_ADD_PRODUCT_NAME, STATE_ADD_PRODUCT_ID) = range(9)
+ STATE_CLIENT_NAME, STATE_CLIENT_PHONE, STATE_CLIENT_EMAIL,
+ STATE_ADD_PRODUCT_NAME, STATE_ADD_PRODUCT_ID) = range(10)
 
 
 # ── Data helpers ───────────────────────────────────────────────────────────
@@ -109,41 +109,20 @@ def fetch_variations(pid):
 
 # ── WC helpers ─────────────────────────────────────────────────────────────
 
-def wc_lookup_by_phone(phone):
-    """Orders API দিয়ে billing phone search করো (Customers API phone support করে না)।"""
-    import re
-    digits = re.sub(r"[^0-9]", "", phone)
-    term = digits[-11:] if len(digits) >= 11 else digits
+def wc_lookup_by_email(email):
+    """WC Customers API দিয়ে email search."""
     try:
-        # Method 1: Orders API — billing phone searchable
-        resp = req.get(WP_URL + "/wp-json/wc/v3/orders",
+        resp = req.get(WP_URL + "/wp-json/wc/v3/customers",
                        auth=(WC_KEY, WC_SECRET),
-                       params={"search": term, "per_page": 1,
-                               "orderby": "date", "order": "desc"},
+                       params={"email": email, "per_page": 1},
                        timeout=15).json()
         if isinstance(resp, list) and resp:
-            billing = resp[0].get("billing", {})
-            name = (billing.get("first_name", "") + " " + billing.get("last_name", "")).strip()
-            if name or billing.get("email"):
-                return {"found": True,
-                        "name": name or "N/A",
-                        "email": billing.get("email", ""),
-                        "phone": billing.get("phone", "") or phone}
-
-        # Method 2: Customers API fallback (email/name match)
-        resp2 = req.get(WP_URL + "/wp-json/wc/v3/customers",
-                        auth=(WC_KEY, WC_SECRET),
-                        params={"search": term, "per_page": 5},
-                        timeout=15).json()
-        if isinstance(resp2, list) and resp2:
-            c = resp2[0]
+            c = resp[0]
             name = (c.get("first_name", "") + " " + c.get("last_name", "")).strip()
-            return {"found": True,
-                    "name": name or "N/A",
-                    "email": c.get("email", ""),
-                    "phone": c.get("billing", {}).get("phone", "") or phone}
+            phone = c.get("billing", {}).get("phone", "")
+            return {"found": True, "name": name or "N/A", "email": c.get("email", email), "phone": phone}
     except Exception as e:
-        logger.error("wc_lookup: " + str(e))
+        logger.error("wc_lookup_by_email: " + str(e))
     return {"found": False}
 
 def wc_create_coupon(amount, product_id):
@@ -398,7 +377,7 @@ async def product_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["product_data"]["variations"] = variations
     if not variations:
         context.user_data["selected_variation"] = {"id": data["pid"], "name": name, "price": 0}
-        return await _ask_phone(query, context)
+        return await _ask_email(query, context)
     await query.edit_message_text("📦 *" + name + "*\n\nPlan বেছে নাও:",
                                   parse_mode="Markdown", reply_markup=variation_keyboard(variations))
     return STATE_VARIATION
@@ -417,40 +396,40 @@ async def variation_selected(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
     context.user_data["selected_variation"] = variations[idx]
     context.user_data["final_price"]        = variations[idx]["price"]
-    return await _ask_phone(query, context)
+    return await _ask_email(query, context)
 
-async def _ask_phone(query, context):
+async def _ask_email(query, context):
     v = context.user_data["selected_variation"]
     await query.edit_message_text(
         "✅ *" + context.user_data["product_name"] + "*\n"
         "📋 Plan: " + v["name"] + " — ৳" + str(v["price"]) + "\n\n"
-        "📱 Client এর *WhatsApp নম্বর* দাও:\n"
+        "📧 Client এর *Email* দাও:\n"
         "(আগের account check করা হবে)",
         parse_mode="Markdown"
     )
-    return STATE_PHONE_LOOKUP
+    return STATE_EMAIL_LOOKUP
 
-async def handle_phone_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_email_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import re
-    phone  = update.message.text.strip()
-    digits = re.sub(r"[^0-9]", "", phone)
-    if len(digits) < 10:
-        await update.message.reply_text("❌ সঠিক নম্বর দাও।")
-        return STATE_PHONE_LOOKUP
-    context.user_data["client_phone"] = phone
+    email = update.message.text.strip().lower()
+    if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
+        await update.message.reply_text("❌ সঠিক email দাও।")
+        return STATE_EMAIL_LOOKUP
+    context.user_data["client_email"] = email
     await update.message.reply_text("🔍 Account check করছি...")
-    result = wc_lookup_by_phone(phone)
+    result = wc_lookup_by_email(email)
     if result["found"]:
         context.user_data.update({
             "client_name":  result["name"],
             "client_email": result["email"],
-            "client_phone": result["phone"] or phone,
+            "client_phone": result["phone"],
         })
+        phone_line = ("📱 Phone: " + result["phone"] + "\n") if result["phone"] else ""
         await update.message.reply_text(
             "✅ *Account পাওয়া গেছে!*\n\n"
             "👤 নাম: " + result["name"] + "\n"
             "📧 Email: " + result["email"] + "\n"
-            "📱 Phone: " + (result["phone"] or phone) + "\n\n"
+            + phone_line + "\n"
             "এই client এর জন্য order করবো?",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
@@ -463,7 +442,7 @@ async def handle_phone_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE
         return STATE_CONFIRM
     else:
         await update.message.reply_text(
-            "ℹ️ এই নম্বরে account নেই।\n\n👤 Client এর *নাম* দাও:",
+            "ℹ️ এই email এ account নেই।\n\n👤 Client এর *নাম* দাও:",
             parse_mode="Markdown"
         )
         return STATE_CLIENT_NAME
@@ -475,18 +454,19 @@ async def get_client_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return STATE_CLIENT_NAME
     context.user_data["client_name"] = name
     await update.message.reply_text(
-        "✅ নাম: *" + name + "*\n\n📧 Client এর *Email* দাও:",
+        "✅ নাম: *" + name + "*\n\n📱 Client এর *WhatsApp নম্বর* দাও:",
         parse_mode="Markdown"
     )
-    return STATE_CLIENT_EMAIL
+    return STATE_CLIENT_PHONE
 
-async def get_client_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def get_client_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import re
-    email = update.message.text.strip().lower()
-    if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
-        await update.message.reply_text("❌ সঠিক email দাও।")
-        return STATE_CLIENT_EMAIL
-    context.user_data["client_email"] = email
+    phone = update.message.text.strip()
+    digits = re.sub(r"[^0-9]", "", phone)
+    if len(digits) < 10:
+        await update.message.reply_text("❌ সঠিক নম্বর দাও।")
+        return STATE_CLIENT_PHONE
+    context.user_data["client_phone"] = phone
     await update.message.reply_text(
         summary_text(context),
         parse_mode="Markdown",
@@ -499,7 +479,9 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "lookup_yes":
-        # Account found confirmed — show summary with discount option
+        if not context.user_data.get("client_phone"):
+            await query.edit_message_text("📱 Client এর *WhatsApp নম্বর* দাও:", parse_mode="Markdown")
+            return STATE_CLIENT_PHONE
         await query.edit_message_text(
             summary_text(context),
             parse_mode="Markdown",
@@ -509,7 +491,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "lookup_no":
         context.user_data.pop("client_name",  None)
-        context.user_data.pop("client_email", None)
+        context.user_data.pop("client_phone", None)
         await query.edit_message_text("👤 Client এর *নাম* দাও:", parse_mode="Markdown")
         return STATE_CLIENT_NAME
 
@@ -704,12 +686,12 @@ def main():
                                      CallbackQueryHandler(cancel,             pattern="^cancel$")],
             STATE_VARIATION:        [CallbackQueryHandler(variation_selected, pattern="^(var_|back_product)"),
                                      CallbackQueryHandler(cancel,             pattern="^cancel$")],
-            STATE_PHONE_LOOKUP:     [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone_lookup)],
+            STATE_EMAIL_LOOKUP:     [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_email_lookup)],
             STATE_CONFIRM:          [CallbackQueryHandler(handle_confirm,     pattern="^(lookup_yes|lookup_no|add_discount|confirm_yes|confirm_no)$"),
                                      MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_price)],
             STATE_CUSTOM_PRICE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_price)],
             STATE_CLIENT_NAME:      [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_name)],
-            STATE_CLIENT_EMAIL:     [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_email)],
+            STATE_CLIENT_PHONE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_phone)],
             STATE_ADD_PRODUCT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_product_name)],
             STATE_ADD_PRODUCT_ID:   [MessageHandler(filters.TEXT & ~filters.COMMAND, add_product_id)],
         },
