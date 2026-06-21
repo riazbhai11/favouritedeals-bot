@@ -1,7 +1,7 @@
 import os
 import logging
 import pg8000.native
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
@@ -37,8 +37,25 @@ FONNTE_TOKEN     = "8oSaMqEDoyw8Bk94Ctbv"
 FD_MAIN_WHATSAPP = "01781678471"
 FD_WEBSITE       = "favouritedeals.online"
 
-app       = Flask(__name__)
+flask_app = Flask(__name__)
 main_loop = None
+tg_bot    = None  # global bot reference
+
+# =============================================
+# TELEGRAM SEND HELPER
+# =============================================
+
+async def tg_send(text, reply_markup=None):
+    """Global helper to send Telegram message using the running bot"""
+    try:
+        await tg_bot.send_message(
+            chat_id=MAIN_CHAT_ID,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"tg_send error: {e}")
 
 # =============================================
 # WHATSAPP
@@ -76,7 +93,6 @@ def wa_footer():
 # =============================================
 
 def wa_subscription_activated(name, product, next_date):
-    """নতুন order complete হলে subscription active notification"""
     return (
         f"━━━━━━━━━━━━━━━━━━\n"
         f"✅ *Favourite Deals*\n"
@@ -92,7 +108,6 @@ def wa_subscription_activated(name, product, next_date):
 
 
 def wa_subscription_activated_due(name, product, next_date):
-    """নতুন order — subscription active কিন্তু payment বাকি"""
     return (
         f"━━━━━━━━━━━━━━━━━━\n"
         f"✅ *Favourite Deals*\n"
@@ -108,7 +123,6 @@ def wa_subscription_activated_due(name, product, next_date):
 
 
 def wa_subscription_renewed(name, product, next_date):
-    """পুরনো subscription renew notification"""
     return (
         f"━━━━━━━━━━━━━━━━━━\n"
         f"✅ *Favourite Deals*\n"
@@ -123,7 +137,6 @@ def wa_subscription_renewed(name, product, next_date):
 
 
 def wa_subscription_paused(name, product):
-    """Subscription pause notification"""
     return (
         f"━━━━━━━━━━━━━━━━━━\n"
         f"⏸️ *Favourite Deals*\n"
@@ -136,7 +149,6 @@ def wa_subscription_paused(name, product):
 
 
 def wa_subscription_cancelled(name, product):
-    """Subscription cancel notification"""
     return (
         f"━━━━━━━━━━━━━━━━━━\n"
         f"❌ *Favourite Deals*\n"
@@ -149,7 +161,6 @@ def wa_subscription_cancelled(name, product):
 
 
 def wa_due_reminder(name, product, count):
-    """Payment due reminder"""
     return (
         f"━━━━━━━━━━━━━━━━━━\n"
         f"💳 *Favourite Deals*\n"
@@ -430,11 +441,6 @@ def add_one_month(dt):
 # =============================================
 
 async def activate_subscription_for_order(order_id, paid):
-    """
-    নতুন order complete করার পর subscription activate করো।
-    paid=True  → payment নেওয়া হয়েছে
-    paid=False → payment বাকি (due চালু হবে)
-    """
     order = wc_get(f"orders/{order_id}")
     if not order:
         return False, "❌ Order পাওয়া যায়নি।"
@@ -444,10 +450,8 @@ async def activate_subscription_for_order(order_id, paid):
     client_email = billing.get("email", "")
     client_phone = billing.get("phone", "")
 
-    # Subscription খোঁজো
     subs = get_subscriptions_by_email(client_email) if client_email else []
     if not subs:
-        # Subscription নেই — শুধু order complete করো
         wc_put(f"orders/{order_id}", {"status": "completed"})
         return True, f"✅ Order #{order_id} Complete!\n\n⚠️ কোনো Subscription পাওয়া যায়নি।"
 
@@ -455,15 +459,12 @@ async def activate_subscription_for_order(order_id, paid):
     sub_id     = sub.get("id")
     item_names = ", ".join([i.get("name", "?") for i in sub.get("line_items", [])]) or "Subscription"
 
-    # Next payment date — WooCommerce এর date directly নাও (add_one_month করা লাগবে না)
     raw_next  = sub.get("next_payment_date_gmt", "")
     next_dt   = parse_wc_dt(raw_next) if raw_next else add_one_month(datetime.utcnow())
     next_show = next_dt.strftime("%d/%m/%Y")
 
-    # WooCommerce order → completed
     wc_put(f"orders/{order_id}", {"status": "completed"})
 
-    # Subscription → active (bot controlled)
     wc_set_bot_controlled(sub_id, True)
     result = wp_subscription_renew(sub_id, next_dt, status="active")
     wc_set_bot_controlled(sub_id, False)
@@ -472,7 +473,6 @@ async def activate_subscription_for_order(order_id, paid):
         return False, f"❌ Subscription activate হয়নি।\n{result.get('message','')}"
 
     if paid:
-        # টাকা পেয়েছি — normal activation
         send_fonnte_wa(client_phone, wa_subscription_activated(client_name, item_names, next_show))
         return True, (
             f"✅ *Order #{order_id} Complete!*\n\n"
@@ -482,25 +482,19 @@ async def activate_subscription_for_order(order_id, paid):
             f"{'✅ Client এ WhatsApp গেছে।' if client_phone else '⚠️ Phone নেই।'}"
         )
     else:
-        # টাকা বাকি — due চালু করো
         send_fonnte_wa(client_phone, wa_subscription_activated_due(client_name, item_names, next_show))
         upsert_sub_payment_due(sub_id, client_name, client_email, client_phone, item_names, next_dt)
 
-        from telegram import Bot
         kb = [[InlineKeyboardButton("✅ টাকা পেয়েছি", callback_data=f"sub_due_paid_{sub_id}")]]
-        await Bot(token=BOT_TOKEN).send_message(
-            chat_id=MAIN_CHAT_ID,
-            text=(
-                f"💰 *Payment Due — Subscription*\n\n"
-                f"#{sub_id} | Order #{order_id}\n"
-                f"👤 {client_name}\n"
-                f"📧 {client_email}\n"
-                f"📦 {item_names}\n"
-                f"📅 Next: {next_show}\n\n"
-                f"টাকা পেলে press করো।"
-            ),
-            reply_markup=InlineKeyboardMarkup(kb),
-            parse_mode="Markdown"
+        await tg_send(
+            f"💰 *Payment Due — Subscription*\n\n"
+            f"#{sub_id} | Order #{order_id}\n"
+            f"👤 {client_name}\n"
+            f"📧 {client_email}\n"
+            f"📦 {item_names}\n"
+            f"📅 Next: {next_show}\n\n"
+            f"টাকা পেলে press করো।",
+            reply_markup=InlineKeyboardMarkup(kb)
         )
         return True, (
             f"✅ *Order #{order_id} Complete!*\n\n"
@@ -516,7 +510,6 @@ async def activate_subscription_for_order(order_id, paid):
 # =============================================
 
 async def process_subscription_renew(sub_id, paid, custom_dt=None):
-    """পুরনো subscription renew করো"""
     sub = wc_get(f"subscriptions/{sub_id}")
     if not sub or "id" not in sub:
         return False, "❌ Subscription পাওয়া যায়নি।"
@@ -562,21 +555,16 @@ async def process_subscription_renew(sub_id, paid, custom_dt=None):
         upsert_sub_payment_due(sub_id, client_name, client_email, client_phone, item_names, next_dt)
         send_fonnte_wa(client_phone, wa_subscription_activated_due(client_name, item_names, next_show))
 
-        from telegram import Bot
         kb = [[InlineKeyboardButton("✅ টাকা পেয়েছি", callback_data=f"sub_due_paid_{sub_id}")]]
-        await Bot(token=BOT_TOKEN).send_message(
-            chat_id=MAIN_CHAT_ID,
-            text=(
-                f"💰 *Payment Due — Renewal*\n\n"
-                f"#{sub_id}\n"
-                f"👤 {client_name}\n"
-                f"📧 {client_email}\n"
-                f"📦 {item_names}\n"
-                f"📅 Next: {next_show}\n\n"
-                f"টাকা পেলে press করো।"
-            ),
-            reply_markup=InlineKeyboardMarkup(kb),
-            parse_mode="Markdown"
+        await tg_send(
+            f"💰 *Payment Due — Renewal*\n\n"
+            f"#{sub_id}\n"
+            f"👤 {client_name}\n"
+            f"📧 {client_email}\n"
+            f"📦 {item_names}\n"
+            f"📅 Next: {next_show}\n\n"
+            f"টাকা পেলে press করো।",
+            reply_markup=InlineKeyboardMarkup(kb)
         )
         return True, (
             f"✅ *Subscription #{sub_id} Active হয়েছে*\n\n"
@@ -590,9 +578,8 @@ async def process_subscription_renew(sub_id, paid, custom_dt=None):
 # =============================================
 
 async def send_subscription_due_reminders():
-    """প্রতি ১২ ঘন্টায় payment due reminder"""
     while True:
-        await asyncio.sleep(60 * 60)  # প্রতি ঘন্টায় check
+        await asyncio.sleep(60 * 60)
         try:
             rows = get_pending_sub_payment_due()
             now  = datetime.utcnow()
@@ -607,17 +594,12 @@ async def send_subscription_due_reminders():
                 )
                 mark_sub_due_reminded(row["sub_id"])
 
-                from telegram import Bot
                 kb = [[InlineKeyboardButton("✅ টাকা পেয়েছি", callback_data=f"sub_due_paid_{row['sub_id']}")]]
-                await Bot(token=BOT_TOKEN).send_message(
-                    chat_id=MAIN_CHAT_ID,
-                    text=(
-                        f"⏰ *Due Reminder #{count}*\n\n"
-                        f"#{row['sub_id']} — {row['customer_name']}\n"
-                        f"📦 {row['item_names']}"
-                    ),
-                    reply_markup=InlineKeyboardMarkup(kb),
-                    parse_mode="Markdown"
+                await tg_send(
+                    f"⏰ *Due Reminder #{count}*\n\n"
+                    f"#{row['sub_id']} — {row['customer_name']}\n"
+                    f"📦 {row['item_names']}",
+                    reply_markup=InlineKeyboardMarkup(kb)
                 )
         except Exception as e:
             logger.error(f"Sub due reminder error: {e}")
@@ -647,7 +629,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.chat.send_action("typing")
 
-    # Custom renew date waiting
     if context.user_data.get("state") == "waiting_custom_renew_date":
         text = update.message.text.strip()
         try:
@@ -676,7 +657,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data  = query.data
 
     try:
-        # ── Menu ──────────────────────────────────────────────────────
         if data == "menu":
             await query.edit_message_text(
                 "🛍️ *FD Assistant*\n\nকী করবো?",
@@ -684,11 +664,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-        # ── Active Orders ─────────────────────────────────────────────
         elif data == "active_orders":
             await show_active_orders(query)
 
-        # ── Subscription Check ────────────────────────────────────────
         elif data == "sub_check":
             await query.edit_message_text(
                 "🔍 *Subscription Check*\n\nClient এর email দাও:\n`/sub email@gmail.com`",
@@ -696,7 +674,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-        # ── Order: Status Change ──────────────────────────────────────
         elif data.startswith("order_status_"):
             order_id = tail_int(data)
             await query.edit_message_text(
@@ -730,7 +707,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-        # ── Order: Complete → টাকা পেয়েছো? ──────────────────────────
         elif data.startswith("order_complete_"):
             order_id = tail_int(data)
             await query.edit_message_text(
@@ -763,7 +739,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-        # ── Sub: Due Paid ─────────────────────────────────────────────
         elif data.startswith("sub_due_paid_"):
             sub_id = tail_int(data)
             clear_sub_payment_due(sub_id)
@@ -773,7 +748,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-        # ── Sub: Pause ────────────────────────────────────────────────
         elif data.startswith("sub_pause_confirm_"):
             sub_id = tail_int(data)
             wc_set_bot_controlled(sub_id, True)
@@ -808,7 +782,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-        # ── Sub: Renew ────────────────────────────────────────────────
         elif data.startswith("sub_renew_"):
             sub_id = tail_int(data)
             await query.edit_message_text(
@@ -859,17 +832,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
-        # ── Sub: Cancel ───────────────────────────────────────────────
         elif data.startswith("sub_cancel_confirm_"):
             sub_id = tail_int(data)
-            # আগে subscription info নাও
             sub          = wc_get(f"subscriptions/{sub_id}") or {}
             billing      = sub.get("billing", {})
             client_name  = billing.get("first_name", "প্রিয় গ্রাহক")
             client_phone = billing.get("phone", "")
             item_names   = ", ".join([i.get("name", "?") for i in sub.get("line_items", [])]) or "Subscription"
 
-            # Cancel করো
             result = wc_put(f"subscriptions/{sub_id}", {"status": "cancelled"})
             if result and result.get("status") == "cancelled":
                 send_fonnte_wa(client_phone, wa_subscription_cancelled(client_name, item_names))
@@ -1010,7 +980,7 @@ async def subscription_command(update: Update, context: ContextTypes.DEFAULT_TYP
 # FLASK WEBHOOK
 # =============================================
 
-@app.route("/webhook/woocommerce", methods=["POST"])
+@flask_app.route("/webhook/woocommerce", methods=["POST"])
 def woocommerce_webhook():
     try:
         raw = request.data
@@ -1033,7 +1003,6 @@ def woocommerce_webhook():
             f"{i['name']} x{i['quantity']}" for i in data.get("line_items", [])
         ])
 
-        # Bot এ notification পাঠাও + Active Orders button
         msg = (
             f"🛍️ *নতুন Order!*\n\n"
             f"📋 #{order_id}\n"
@@ -1054,30 +1023,24 @@ def woocommerce_webhook():
 
 
 async def send_order_notification(message, order_id):
-    from telegram import Bot
     kb = [[InlineKeyboardButton("📋 Active Orders দেখো", callback_data="active_orders")]]
-    await Bot(token=BOT_TOKEN).send_message(
-        chat_id=CHAT_ID,
-        text=message,
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="Markdown"
-    )
+    await tg_send(message, reply_markup=InlineKeyboardMarkup(kb))
 
 
-@app.route("/health", methods=["GET"])
+@flask_app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "running"}), 200
 
 
 def run_flask():
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
 # =============================================
 # MAIN
 # =============================================
 
 async def main():
-    global main_loop
+    global main_loop, tg_bot
     main_loop = asyncio.get_event_loop()
     setup_db()
 
@@ -1095,6 +1058,7 @@ async def main():
     async with bot_app:
         await bot_app.initialize()
         await bot_app.start()
+        tg_bot = bot_app.bot  # store global bot reference
         await bot_app.updater.start_polling()
         asyncio.create_task(send_subscription_due_reminders())
         await asyncio.Event().wait()
